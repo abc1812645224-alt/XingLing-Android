@@ -1,0 +1,65 @@
+name: XingLing Build CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Create signing keystore
+      run: |
+        keytool -genkeypair -v -keystore release.keystore -alias key0 -keyalg RSA -keysize 2048 -validity 10000 \
+          -storepass xingling -keypass xingling -dname "CN=XingLing, OU=Dev, O=XingLing, L=City, S=State, C=CN"
+        echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/release.keystore" >> $GITHUB_ENV
+        echo "KEYSTORE_PASSWORD=xingling" >> $GITHUB_ENV
+        echo "KEY_ALIAS=key0" >> $GITHUB_ENV
+        echo "KEY_PASSWORD=xingling" >> $GITHUB_ENV
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.10.2
+
+    - name: Build with Gradle
+      run: ./gradlew assembleRelease
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: 星灵-XingLing-v0.1.0
+        path: app/build/outputs/apk/release/*.apk
+        if-no-files-found: warn
+
+    - name: Publish Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: 星灵 XingLing ${{ github.ref_name }}
+        body: |
+          ## 星灵 XingLing ${{ github.ref_name }}
+          手机直连随身 WiFi 设备后台的控制 App，全程走局域网 HTTP，不依赖网页、不依赖云端。
+          - 总览 / 信号 / 频段 / 短信 / 设置 五 Tab
+          - VoLTE/VoNR、锁频段、锁基站、APN、短信与转发、热点、流量校准、定时任务
+          - Root 终端、Web 终端、SSH、无线 ADB、OTA、测速、局域网设备、SMB、分区备份、DIAG
+          - 桌面小组件（4×2 / 2×2）分层刷新
+        files: app/build/outputs/apk/release/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

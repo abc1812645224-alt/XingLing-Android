@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  星灵桌面小组件配色（浅色 / iOS 玻璃卡片）
+  与 App 内保持一致：半透明玻璃底 + 主/次/三级文字层级 + 系统强调色。
+  夜间由 res/values-night/colors.xml 覆盖。
+-->
+<resources>
+    <color name="xl_widget_bg">#F2FFFFFF</color>
+    <color name="xl_widget_label">#FF1C1C1E</color>
+    <color name="xl_widget_secondary">#993C3C43</color>
+    <color name="xl_widget_tertiary">#8A3C3C43</color>
+    <color name="xl_widget_accent">#FF007AFF</color>
+    <color name="xl_widget_green">#FF34C759</color>
+    <color name="xl_widget_red">#FFFF3B30</color>
+    <color name="xl_widget_orange">#FFFF9500</color>
+    <color name="xl_widget_purple">#FF5856D6</color>
+    <color name="xl_widget_cyan">#FF5AC8FA</color>
+    <color name="xl_widget_section_bg">#FFEFEFF4</color>
+    <!-- 指标胶囊底（比分区底略浅，用于线条图标胶囊） -->
+    <color name="xl_widget_pill_bg">#FFEFF1F6</color>
+    <!-- 流量双列竖分隔线 -->
+    <color name="xl_widget_separator">#1A3C3C43</color>
+</resources>

@@ -1,0 +1,33 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 蜂窝基站（网络类型 5G/4G） -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M9.2,20.5 L12,11.3 L14.8,20.5" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M10.5,16.4 H13.5" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M9.3,9.6 A3.8,3.8 0 0 0 6.4,12.6" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M14.7,9.6 A3.8,3.8 0 0 1 17.6,12.6" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12,8.8 m-0.95,0 a0.95,0.95 0 1,0 1.9,0 a0.95,0.95 0 1,0 -1.9,0" />
+</vector>

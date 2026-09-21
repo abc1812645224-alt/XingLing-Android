@@ -1,0 +1,30 @@
+*.iml
+.gradle/
+**/build/
+/local.properties
+.idea/
+*.keystore
+*.jks
+*.log
+gradle.zip
+jdk.zip
+gradle-8.2/
+jdk/
+gradle-extract/
+reference-rtmon/
+.superpowers/
+*_20*_*.properties
+*_20*_*.xml
+*_backup.xml
+.DS_Store
+*.apk
+*.aab
+temp/
+temp_build_*.txt
+temp_build_*.log
+
+# 第三方参考与测试产物（不入库）
+GitHub参考项目/
+test_screens/
+桌面小组件参考/
+高级后台刷入文件 参考/

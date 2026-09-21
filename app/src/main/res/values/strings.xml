@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">星灵</string>
+
+    <!-- 桌面小组件 -->
+    <string name="widget_4x2_label">星灵 · 设备状态</string>
+    <string name="widget_4x2_desc">横条显示设备名/信号/电量/流量/频段/温度/内存等状态</string>
+    <string name="widget_2x2_label">星灵 · 迷你状态</string>
+    <string name="widget_2x2_desc">迷你卡片显示设备名/信号/电量/今日流量</string>
+</resources>

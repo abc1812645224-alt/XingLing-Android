@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 星灵桌面小组件配色（深色 / iOS 玻璃卡片） -->
+<resources>
+    <color name="xl_widget_bg">#F21C1C1E</color>
+    <color name="xl_widget_label">#FFF5F5F7</color>
+    <color name="xl_widget_secondary">#99EBEBF5</color>
+    <color name="xl_widget_tertiary">#8AEBEBF5</color>
+    <color name="xl_widget_accent">#FF0A84FF</color>
+    <color name="xl_widget_green">#FF30D158</color>
+    <color name="xl_widget_red">#FFFF453A</color>
+    <color name="xl_widget_orange">#FFFF9F0A</color>
+    <color name="xl_widget_purple">#FF5E5CE6</color>
+    <color name="xl_widget_cyan">#FF64D2FF</color>
+    <color name="xl_widget_section_bg">#FF2C2C2E</color>
+    <color name="xl_widget_pill_bg">#FF2A2A2D</color>
+    <color name="xl_widget_separator">#1FEBEBF5</color>
+</resources>
