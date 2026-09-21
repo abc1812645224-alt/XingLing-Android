@@ -101,7 +101,7 @@ interface DeviceBackend {
     suspend fun fetchCellularUsage(startTimeMs: Long, endTimeMs: Long): Result<Long>
 
     /**
-     * 高级功能（网络/设备/高级三批共 23 项）统一入口。
+     * 高级功能（网络/设备/高级三批共 38 项）统一入口。
      * 未接入具体实现的后台默认返回 UnsupportedFeatures（页面展示空态说明）。
      */
     val features: DeviceFeatures

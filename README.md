@@ -2,7 +2,7 @@
 
 手机直连随身 WiFi 设备后台的控制 App，全程走局域网 HTTP，不依赖网页、不依赖云端。
 
-> 版本：`versionName 0.1.0`（versionCode 9）· 包名 `com.xingling.app`
+> 版本：`versionName 0.2.1`（versionCode 10）· 包名 `com.xingling.app`
 
 ## 它能做什么
 

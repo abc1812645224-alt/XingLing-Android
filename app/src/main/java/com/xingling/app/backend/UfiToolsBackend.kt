@@ -30,7 +30,7 @@ class UfiToolsBackend(
 
     private val goform = UfiToolsGoform(api, token, zteToken)
 
-    /** 高级功能（网络/设备/高级三批 23 项）真实实现 */
+    /** 高级功能（网络/设备/高级三批 38 项）真实实现 */
     override val features: DeviceFeatures by lazy {
         UfiToolsFeatureApi(api, goform, hostName)
     }

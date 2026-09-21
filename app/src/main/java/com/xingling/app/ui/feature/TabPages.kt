@@ -599,7 +599,7 @@ fun SettingsTabContent(
         // 7. 关于
         FeatureCard(title = "关于", subtitle = "星灵 · 移动网络控制中枢") {
             Text(
-                "版本 0.1.0 · 兼容 UFI-TOOLS 后台与官方 UFIPanel 客户端协议（/api/* REST + goform 反代 + kano 签名）。",
+                "版本 0.2.1 · 兼容 UFI-TOOLS 后台与官方 UFIPanel 客户端协议（/api/* REST + goform 反代 + kano 签名）。",
                 style = MaterialTheme.typography.bodySmall,
                 color = iOSSecondaryLabel,
                 lineHeight = 19.sp

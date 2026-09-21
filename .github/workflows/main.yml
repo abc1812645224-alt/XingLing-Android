@@ -40,10 +40,17 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew assembleRelease
 
+    - name: Read app version from Gradle
+      id: appver
+      run: |
+        VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+        test -n "$VERSION_NAME"
+        echo "APP_VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: 星灵-XingLing-v0.1.0
+        name: 星灵-XingLing-v${{ env.APP_VERSION_NAME }}
         path: app/build/outputs/apk/release/*.apk
         if-no-files-found: warn
 

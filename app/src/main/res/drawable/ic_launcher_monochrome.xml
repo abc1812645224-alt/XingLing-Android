@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  星灵 (XingLing) · 方案 C「灵动圆环」单色层
+  供 Android 13+ 主题图标使用：系统会忽略此处填充色，统一按主题色着色，
+  因此本文件仅保留形状（双层圆环 + 流星拖尾）与透明度层次。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 外环（外半径 29 / 内半径 25.6） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,25 A29,29 0 1 1 54,83 A29,29 0 1 1 54,25 Z M54,28.4 A25.6,25.6 0 1 1 54,79.6 A25.6,25.6 0 1 1 54,28.4 Z"/>
+
+    <!-- 内环（外半径 20 / 内半径 17.6） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M54,34 A20,20 0 1 1 54,74 A20,20 0 1 1 54,34 Z M54,36.4 A17.6,17.6 0 1 1 54,71.6 A17.6,17.6 0 1 1 54,36.4 Z"/>
+
+    <!-- 流星拖尾（尾端 → 头部逐点增大、逐点加深） -->
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.18"
+        android:pathData="M48.43,41.95 A0.7,0.7 0 1 1 49.83,41.95 A0.7,0.7 0 1 1 48.43,41.95 Z"/>
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.28"
+        android:pathData="M50.74,41.20 A1.0,1.0 0 1 1 52.74,41.20 A1.0,1.0 0 1 1 50.74,41.20 Z"/>
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.38"
+        android:pathData="M53.05,41.01 A1.4,1.4 0 1 1 55.85,41.01 A1.4,1.4 0 1 1 53.05,41.01 Z"/>
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.50"
+        android:pathData="M55.24,41.39 A1.9,1.9 0 1 1 59.04,41.39 A1.9,1.9 0 1 1 55.24,41.39 Z"/>
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.62"
+        android:pathData="M57.20,42.32 A2.5,2.5 0 1 1 62.20,42.32 A2.5,2.5 0 1 1 57.20,42.32 Z"/>
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.75"
+        android:pathData="M58.80,43.76 A3.2,3.2 0 1 1 65.20,43.76 A3.2,3.2 0 1 1 58.80,43.76 Z"/>
+
+    <!-- 流星头部 -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M59.76,45.64 A4.2,4.2 0 1 1 68.16,45.64 A4.2,4.2 0 1 1 59.76,45.64 Z"/>
+</vector>

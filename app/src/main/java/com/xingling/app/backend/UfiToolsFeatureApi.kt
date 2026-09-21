@@ -1,7 +1,7 @@
 ﻿/*
  * 星灵 (XingLing) · UFI-TOOLS 高级功能实现
  *
- * 将功能清单 23 项全部接入真实后台：
+ * 将功能清单中的高级功能项全部接入真实后台：
  *   - UFI-TOOLS 自有 /api 模块：volte/vonr、getSupportNrBandList、root_shell、
  *     user_shell、smbPath(高级功能)、hasTTYD、adb_wifi_setting、OTA、插件、
  *     speedtest、短信转发、定时任务、cellularUsage 等

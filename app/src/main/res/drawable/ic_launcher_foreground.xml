@@ -1,18 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  星灵 (XingLing) · 方案 C「灵动圆环」前景层
+  双层圆环（外环 + 内环）+ 流星拖尾，简洁几何。108x108 画布，
+  图形最大外缘半径 29，整体落在 72dp 可见区与 66dp 安全区内，
+  圆形 / 方形 / 圆角方形等任意遮罩下均不会被裁切。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- White Circle (Radius 16) -->
-    <path android:fillColor="#FFFFFF"
-          android:pathData="M 54,38 A 16,16 0 1 1 54,70 A 16,16 0 1 1 54,38 Z"/>
-          
-    <!-- The letter 'i' (dot, radius 2.5) -->
-    <path android:fillColor="#3B82F6"
-          android:pathData="M 54,41 A 2.5,2.5 0 1 1 54,46 A 2.5,2.5 0 1 1 54,41 Z"/>
-          
-    <!-- The letter 'i' (stem with rounded caps) -->
-    <path android:fillColor="#3B82F6"
-          android:pathData="M 52,50 Q 52,48 54,48 Q 56,48 56,50 V 60 Q 56,62 54,62 Q 52,62 52,60 Z"/>
+
+    <!-- 外环：外半径 29 / 内半径 25.6 -->
+    <path
+        android:fillColor="#2563EB"
+        android:fillType="evenOdd"
+        android:pathData="M54,25 A29,29 0 1 1 54,83 A29,29 0 1 1 54,25 Z M54,28.4 A25.6,25.6 0 1 1 54,79.6 A25.6,25.6 0 1 1 54,28.4 Z"/>
+
+    <!-- 内环：外半径 20 / 内半径 17.6 -->
+    <path
+        android:fillColor="#3B82F6"
+        android:fillType="evenOdd"
+        android:pathData="M54,34 A20,20 0 1 1 54,74 A20,20 0 1 1 54,34 Z M54,36.4 A17.6,17.6 0 1 1 54,71.6 A17.6,17.6 0 1 1 54,36.4 Z"/>
+
+    <!-- 流星拖尾：沿半径 13 的圆弧，由细到粗、由淡到亮（尾 -> 头） -->
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.18"
+        android:pathData="M48.43,41.95 A0.70,0.70 0 1 1 49.83,41.95 A0.70,0.70 0 1 1 48.43,41.95 Z"/>
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.28"
+        android:pathData="M50.74,41.20 A1.00,1.00 0 1 1 52.74,41.20 A1.00,1.00 0 1 1 50.74,41.20 Z"/>
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.38"
+        android:pathData="M53.05,41.01 A1.40,1.40 0 1 1 55.85,41.01 A1.40,1.40 0 1 1 53.05,41.01 Z"/>
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.50"
+        android:pathData="M55.24,41.39 A1.90,1.90 0 1 1 59.04,41.39 A1.90,1.90 0 1 1 55.24,41.39 Z"/>
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.62"
+        android:pathData="M57.20,42.32 A2.50,2.50 0 1 1 62.20,42.32 A2.50,2.50 0 1 1 57.20,42.32 Z"/>
+    <path android:fillColor="#38BDF8" android:fillAlpha="0.75"
+        android:pathData="M58.80,43.76 A3.20,3.20 0 1 1 65.20,43.76 A3.20,3.20 0 1 1 58.80,43.76 Z"/>
+
+    <!-- 流星头部 -->
+    <path android:fillColor="#38BDF8"
+        android:pathData="M59.76,45.64 A4.20,4.20 0 1 1 68.16,45.64 A4.20,4.20 0 1 1 59.76,45.64 Z"/>
 </vector>
