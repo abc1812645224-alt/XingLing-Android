@@ -13,6 +13,8 @@
 
 package com.xingling.app.backend
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 
 class UfiToolsBackend(
@@ -59,83 +61,115 @@ class UfiToolsBackend(
         } catch (e: Throwable) {
             throw IllegalStateException("设备不可达：${e.message}", e)
         }
-        // 2) 带鉴权拉取总览：口诀校验通过即返回成功；401 抛错由上层提示口令错误
-        fetchOverview().getOrThrow()
+        // 2) 只拉一次核心信息 baseDeviceInfo 即可校验口令并快速完成连接。
+        //    依赖 root shell 的增强项（QoS/QCI、流量分项、限速、开机时长、电池温/容量）
+        //    不再阻塞“连接设备”，改为进入主界面后由 fetchOverview() 并行补齐。
+        coreOverview()
     }
 
+    /** 核心总览：仅一次 /api/baseDeviceInfo（也是验证口令的最小请求） */
+    private suspend fun coreOverview(): BackendOverview =
+        JSONObject(api.get("/api/baseDeviceInfo")).toOverview()
+
     override suspend fun fetchOverview(): Result<BackendOverview> = runCatching {
-        val json = JSONObject(api.get("/api/baseDeviceInfo"))
-        val ov = json.toOverview()
-        // 实时查询 QCI 和上下行最大速率（AT+CGEQOSRDP）
-        var dlMaxMbps = -1
-        var ulMaxMbps = -1
-        var qciStr = ov.qci
-        runCatching {
-            val text = api.get("/api/AT?command=AT%2BCGEQOSRDP%3D1&slot=0")
-            val result = JSONObject(text).optString("result", "")
-            // 格式: ++CGEQOSRDP: 1,9,0,0,0,0,300000,100000
-            Regex("""CGEQOSRDP:\s*(\d+),(\d+),[\d,]+,(\d+),(\d+)""").find(result)?.let { m ->
-                qciStr = m.groupValues[2]
-                dlMaxMbps = m.groupValues[3].toIntOrNull()?.let { it / 1000 } ?: -1
-                ulMaxMbps = m.groupValues[4].toIntOrNull()?.let { it / 1000 } ?: -1
+        val core = coreOverview()
+        // 各增强项彼此独立，全部并发执行；任一项失败都不影响其余与核心数据。
+        coroutineScope {
+            val at = async { runCatching { readAtQos() } }
+            val monthly = async { runCatching { readMonthly() } }
+            val limit = async { runCatching { readDataLimit() } }
+            val extras = async { runCatching { readExtras() } }
+
+            var ov = core
+            at.await().getOrNull()?.let { q ->
+                ov = ov.copy(
+                    qci = q.qci ?: ov.qci,
+                    dlMaxMbps = if (q.dlMbps >= 0) q.dlMbps else ov.dlMaxMbps,
+                    ulMaxMbps = if (q.ulMbps >= 0) q.ulMbps else ov.ulMaxMbps
+                )
             }
+            monthly.await().getOrNull()?.let { m ->
+                ov = ov.copy(monthlyDlBytes = m.dl, monthlyUlBytes = m.ul)
+            }
+            limit.await().getOrNull()?.let { l ->
+                ov = ov.copy(
+                    dataLimitEnabled = l.enabled,
+                    dataLimitMaxBytes = if (l.bytes > 0) l.bytes else ov.dataLimitMaxBytes
+                )
+            }
+            extras.await().getOrNull()?.let { e ->
+                ov = ov.copy(
+                    batteryTemp = if (e.battTemp > 0) e.battTemp else ov.batteryTemp,
+                    batteryCapacityMah = e.battCap,
+                    uptimeSec = e.uptime
+                )
+            }
+            ov
         }
-        // 当月上下行分流流量 + 流量上限：baseDeviceInfo 只有合计 monthly_data，
-        // 分项需从 goform monthly_rx_bytes(接收=下行) / monthly_tx_bytes(发送=上行) 取；
-        // 流量上限为 data_volume_limit_size，格式 "数值_每单位MB系数"（GB 时系数=1024）
-        var monthlyDl = ov.monthlyDlBytes
-        var monthlyUl = ov.monthlyUlBytes
-        var limitEnabled = ov.dataLimitEnabled
-        var limitBytes = ov.dataLimitMaxBytes
+    }
+
+    /** AT+CGEQOSRDP：QCI 与上下行最大速率（解析不到返回 null/默认，不覆盖核心） */
+    private suspend fun readAtQos(): AtQos {
+        val text = api.get("/api/AT?command=AT%2BCGEQOSRDP%3D1&slot=0")
+        val result = JSONObject(text).optString("result", "")
+        // 格式: +CGEQOSRDP: 1,9,0,0,0,0,300000,100000
+        val m = Regex("""CGEQOSRDP:\s*(\d+),(\d+),[\d,]+,(\d+),(\d+)""").find(result)
+        return AtQos(
+            qci = m?.groupValues?.get(2),
+            dlMbps = m?.groupValues?.get(3)?.toIntOrNull()?.let { it / 1000 } ?: -1,
+            ulMbps = m?.groupValues?.get(4)?.toIntOrNull()?.let { it / 1000 } ?: -1
+        )
+    }
+
+    /** 当月上下行分流：goform monthly_rx_bytes(下行) / monthly_tx_bytes(上行)，带进程内缓存兜底 */
+    private suspend fun readMonthly(): Monthly? {
+        var dl: Long? = null
+        var ul: Long? = null
         runCatching {
             val f = goform.read("monthly_rx_bytes,monthly_tx_bytes")
             fun gstr(key: String) = f.optString(key).trim()
                 .takeIf { it.isNotBlank() && it != "--" && !it.equals("null", true) }
-            gstr("monthly_rx_bytes")?.toLongOrNull()?.let { monthlyDl = it; lastMonthlyDlBytes = it }
-            gstr("monthly_tx_bytes")?.toLongOrNull()?.let { monthlyUl = it; lastMonthlyUlBytes = it }
-            
-        }.onFailure {
-            if (lastMonthlyDlBytes >= 0) monthlyDl = lastMonthlyDlBytes
-            if (lastMonthlyUlBytes >= 0) monthlyUl = lastMonthlyUlBytes
+            dl = gstr("monthly_rx_bytes")?.toLongOrNull()?.also { lastMonthlyDlBytes = it }
+            ul = gstr("monthly_tx_bytes")?.toLongOrNull()?.also { lastMonthlyUlBytes = it }
         }
-        runCatching {
-            // 使用高级后台的流量限制
-            val limitObj = features.getDataLimit().getOrNull()
-            if (limitObj != null) {
-                limitEnabled = limitObj.enabled
-                val parsed = limitObj.maxLimit.toLongOrNull() ?: -1L
-                if (parsed > 0) limitBytes = parsed
-            }
-        }
-        ov.copy(
-            qci = qciStr, dlMaxMbps = dlMaxMbps, ulMaxMbps = ulMaxMbps,
-            monthlyDlBytes = monthlyDl, monthlyUlBytes = monthlyUl,
-            dataLimitEnabled = limitEnabled, dataLimitMaxBytes = limitBytes
-        ).let { base ->
-            val (bTemp, bCap) = readBatteryInfo()
-            var uptime = -1L
-            runCatching {
-                val r = features.rootShell("timeout 2s cat /proc/uptime").getOrNull() ?: ""
-                uptime = r.split(".").firstOrNull()?.trim()?.toLongOrNull() ?: -1L
-            }
-            base.copy(batteryTemp = if (bTemp > 0) bTemp else ov.batteryTemp, batteryCapacityMah = bCap, uptimeSec = uptime)
-        }
+        val fd = dl ?: if (lastMonthlyDlBytes >= 0) lastMonthlyDlBytes else null
+        val fu = ul ?: if (lastMonthlyUlBytes >= 0) lastMonthlyUlBytes else null
+        return if (fd != null && fu != null) Monthly(fd, fu) else null
     }
 
-    /** 从 root_shell 读电池温度（毫摄氏度 → ℃）和容量 */
-    private suspend fun readBatteryInfo(): Pair<Float, Int> {
-        var temp = -1f
-        var capMah = -1
-        runCatching {
-            val t = features.rootShell("timeout 2s cat /sys/class/power_supply/battery/temp").getOrNull()
-            t?.trim()?.toIntOrNull()?.let { temp = it / 10f }
-        }
-        runCatching {
-            val c = features.rootShell("timeout 2s cat /sys/class/power_supply/battery/charge_full").getOrNull()
-            c?.trim()?.toLongOrNull()?.let { capMah = (it / 1000).toInt() }
-        }
-        return temp to capMah
+    /** 高级后台流量限制（data_volume_limit_size） */
+    private suspend fun readDataLimit(): Limit? {
+        val obj = features.getDataLimit().getOrNull() ?: return null
+        return Limit(enabled = obj.enabled, bytes = obj.maxLimit.toLongOrNull() ?: -1L)
     }
+
+    /** 电池温度/容量 + 开机时长：三个 root shell 并发，互不阻塞 */
+    private suspend fun readExtras(): Extras = coroutineScope {
+        val temp = async {
+            runCatching {
+                val t = features.rootShell("timeout 2s cat /sys/class/power_supply/battery/temp").getOrNull()
+                t?.trim()?.toIntOrNull()?.let { it / 10f }
+            }.getOrNull() ?: -1f
+        }
+        val cap = async {
+            runCatching {
+                val c = features.rootShell("timeout 2s cat /sys/class/power_supply/battery/charge_full").getOrNull()
+                c?.trim()?.toLongOrNull()?.let { (it / 1000).toInt() }
+            }.getOrNull() ?: -1
+        }
+        val up = async {
+            runCatching {
+                val r = features.rootShell("timeout 2s cat /proc/uptime").getOrNull()
+                r?.split(".")?.firstOrNull()?.trim()?.toLongOrNull()
+            }.getOrNull() ?: -1L
+        }
+        Extras(temp.await(), cap.await(), up.await())
+    }
+
+    private class AtQos(val qci: String?, val dlMbps: Int, val ulMbps: Int)
+    private class Monthly(val dl: Long, val ul: Long)
+    private class Limit(val enabled: Boolean, val bytes: Long)
+    private class Extras(val battTemp: Float, val battCap: Int, val uptime: Long)
 
     override suspend fun fetchSignalInfo(): Result<BackendSignalInfo> = runCatching {
         parseSignal()
