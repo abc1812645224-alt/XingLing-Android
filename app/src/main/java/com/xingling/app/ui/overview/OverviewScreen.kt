@@ -405,8 +405,8 @@ fun OverviewScreen(
                 else -> iOSRed
             }
         } else iOSSecondaryLabel
-// 3. 5G载波聚合卡 (还原到原位置)
-CarrierAggregationCard(signalMetrics, connected = ov != null, qci = ov?.qci ?: "9", scoreText = scoreText, scoreColor = scoreColor)
+// 3. 载波聚合统一卡（PCC/SCC 实测数据 + 一键检测并优化，合并原 CA 三卡）
+CaUnifiedCard(signalMetrics, connected = ov != null, backend = backend, qci = ov?.qci ?: "9")
 
 // 4. 设备监控图形卡
 if (ov != null) DeviceMonitorCard(ov, cpuHistory.toList(), memHistory.toList())
@@ -439,6 +439,7 @@ if (showTrafficDialog && ov != null) {
 
 // 流量概览+趋势合并卡（点击可弹出设置已用流量/总流量上限/超额关网对话框）
 if (ov != null) TrafficCard(ov, dailyBytesHistory.toList(), onOpenTrafficConfig = { showTrafficDialog = true })
+
 
 // WiFi 热点信息卡（卡片内直接操作：开关 / SSID / 密码 / 连接数 / 广播隔离）
 HotspotOverviewCard(backend)
@@ -603,7 +604,7 @@ private fun SignalScoreCard(sg: BackendSignalInfo) {
     }
 }
 
-private fun scoreRsrp(v: Int): Float = when {
+internal fun scoreRsrp(v: Int): Float = when {
     v == Int.MIN_VALUE -> 0f
     v >= -75 -> 100f
     v >= -85 -> 80f
@@ -611,14 +612,14 @@ private fun scoreRsrp(v: Int): Float = when {
     v >= -105 -> 40f
     else -> 20f
 }
-private fun scoreSinr(v: Int): Float = when {
+internal fun scoreSinr(v: Int): Float = when {
     v == Int.MIN_VALUE -> 0f
     v >= 20 -> 100f
     v >= 13 -> 75f
     v >= 0 -> 50f
     else -> 25f
 }
-private fun scoreRsrq(v: Int): Float = when {
+internal fun scoreRsrq(v: Int): Float = when {
     v == Int.MIN_VALUE -> 0f
     v >= -5 -> 100f
     v >= -10 -> 75f
@@ -3181,5 +3182,127 @@ private fun ContractRateCard(ov: BackendOverview) {
                 )
             }
         }
+    }
+}
+
+// ================= 载波聚合功能卡（本设备可以用载波聚合） =================
+@Composable
+private fun CaCapabilityCard(signalMetrics: SignalMetrics, connected: Boolean = true) {
+    val servingCells = signalMetrics.servingCells
+    val caActive = servingCells.size >= 2
+    val stateText = when {
+        !connected -> "未连接设备"
+        caActive -> "多载波聚合已激活（${servingCells.size}CA）"
+        else -> "1NR 单载波（省电中）"
+    }
+    val stateColor = when {
+        !connected -> iOSSecondaryLabel
+        caActive -> iOSGreen
+        else -> iOSOrange
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = iOSCardBackground),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            // 头部：双圆 CA 图标 + 标题 + 状态徽章
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val caIconColor = iOSBlue
+                    Canvas(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(caIconColor.copy(alpha = 0.12f))
+                    ) {
+                        val strokeW = size.minDimension * 0.10f
+                        val r = size.minDimension * 0.20f
+                        val dx = size.width * 0.12f
+                        val cx1 = size.width / 2 - dx
+                        val cx2 = size.width / 2 + dx
+                        val cy = size.height / 2
+                        drawCircle(caIconColor, r, Offset(cx1, cy), style = Stroke(width = strokeW, cap = StrokeCap.Round))
+                        drawCircle(caIconColor, r, Offset(cx2, cy), style = Stroke(width = strokeW, cap = StrokeCap.Round))
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("载波聚合功能", style = MaterialTheme.typography.titleMedium, color = iOSLabel)
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (!connected) iOSSeparator.copy(alpha = 0.15f) else iOSGreen.copy(alpha = 0.12f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(if (!connected) iOSSecondaryLabel else iOSGreen)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            if (!connected) "未连接" else "✅ 可以用",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = if (!connected) iOSSecondaryLabel else iOSGreen
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 主体：当前状态 + 三项能力
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = iOSFill,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("当前状态", style = MaterialTheme.typography.bodySmall, color = iOSSecondaryLabel)
+                        Text(stateText, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = stateColor)
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Divider(color = iOSSeparator, thickness = 1.dp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        CaCapabilityItem("NR 载波聚合", "✅ 支持")
+                        CaCapabilityItem("LTE 载波聚合", "✅ 支持")
+                        CaCapabilityItem("EN-DC 双连接", "✅ 支持")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                "提示：本设备硬件支持载波聚合，由基站按需分配——无大流量时保持 1NR 单载波省电，大流量下载或测速时自动开启多载波聚合提速。",
+                style = MaterialTheme.typography.labelSmall,
+                color = iOSSecondaryLabel
+            )
+        }
+    }
+}
+
+@Composable
+private fun CaCapabilityItem(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold), color = iOSGreen)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
     }
 }

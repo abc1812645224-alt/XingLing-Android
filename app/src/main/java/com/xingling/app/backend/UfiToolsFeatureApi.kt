@@ -756,6 +756,7 @@ class UfiToolsFeatureApi(
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .mapNotNull { it.toIntOrNull() }
+            .filter { it > 0 } // 频段编号均 ≥1；"0" 视为未锁定位图默认，不计为锁定
 
     private fun parseCells(raw: Any?): List<CellInfo> {
         val arr = when (raw) {
