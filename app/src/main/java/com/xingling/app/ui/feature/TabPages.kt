@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · 底部 5 Tab 组网与设置中心子页
  *
  * 对齐官方 UFIPanel 底部导航结构：总览 / 信号 / 频段 / 短信 / 设置。
@@ -140,6 +140,9 @@ fun BandTabContent(
     var volteEnabled by remember { mutableStateOf(false) }
     var vonrEnabled by remember { mutableStateOf(false) }
     var performanceMode by remember { mutableStateOf(false) }
+    var perfBusy by remember { mutableStateOf(false) }
+    var perfMsg by remember { mutableStateOf<String?>(null) }
+    var perfErr by remember { mutableStateOf(false) }
     var caEnabled by remember { mutableStateOf(false) }
     var nrBandLock by remember { mutableStateOf<List<Int>>(emptyList()) }
     var lteBandLock by remember { mutableStateOf<List<Int>>(emptyList()) }
@@ -234,23 +237,33 @@ fun BandTabContent(
                 trailing = { ChevronRight() }
             ) { onOpenFeature(FeatureRoute.APN) }
             IconToggleRow(Icons.Filled.Build, Color(0xFFFF9500), "性能模式", "高性能 / 省电切换",
-                checked = performanceMode, onCheckedChange = { v ->
-                    performanceMode = v
-                    scope.launch { runCatching { backend?.features?.setPerformanceMode(v) } }
+                checked = performanceMode, enabled = !perfBusy, onCheckedChange = { v ->
+                    perfBusy = true
+                    scope.launch {
+                        val r = runCatching { backend?.features?.setPerformanceMode(v) }
+                        val ex = r.exceptionOrNull()
+                        if (ex != null) {
+                            perfErr = true
+                            perfMsg = "性能模式切换失败：${ex.message ?: "请确认设备在线及官方后台口令"}"
+                        } else {
+                            performanceMode = v
+                            perfErr = false
+                            perfMsg = "性能模式已${if (v) "开启" else "关闭"}"
+                        }
+                        perfBusy = false
+                    }
                 }
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // 设备管理
-        GroupHeader("设备管理")
-        FeatureCard {
-            IconRow(Icons.Filled.List, Color(0xFF007AFF), "流量校准", "手动校准流量计数",
-                trailing = { ChevronRight() }
-            ) { onOpenFeature(FeatureRoute.CALIBRATE) }
+        perfMsg?.let { m ->
+            Text(
+                m,
+                color = if (perfErr) Color(0xFFFF3B30) else iOSSecondaryLabel,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 10.dp, start = 4.dp, end = 4.dp)
+            )
         }
-
         Spacer(modifier = Modifier.height(120.dp))
     }
 }
@@ -307,17 +320,12 @@ fun SettingsTabContent(
 ) {
     val scope = rememberCoroutineScope()
     var nickname by remember { mutableStateOf<String?>(null) }
-    var powerForwardEnabled by remember { mutableStateOf(false) }
-    var adguardRunning by remember { mutableStateOf(false) }
     var quickActionBusy by remember { mutableStateOf<String?>(null) }
     var showRebootConfirm by remember { mutableStateOf(false) }
     var quickActionMsg by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(backend) {
         backend?.features?.getNickname()?.onSuccess { nickname = it.ifBlank { null } }
-        val ufi = backend as? UfiToolsBackend ?: return@LaunchedEffect
-        ufi.p0.getPowerForwardEnabled().onSuccess { powerForwardEnabled = it }
-        ufi.p2.getAdGuardStatus().onSuccess { adguardRunning = it.running }
     }
 
     // 快捷操作消息自动消失
@@ -379,7 +387,9 @@ fun SettingsTabContent(
             subtitle = "影响总览 / 信号页数据刷新间隔（当前 ${pollIntervalMs / 1000}s）"
         ) {
             listOf(
-                1000L to "约 1 秒",
+                1000L to "极速（约 1 秒）",
+                2000L to "高速（约 2 秒）",
+                3000L to "快速（约 3 秒）",
                 5000L to "标准（约 5 秒）",
                 10000L to "省电（约 10 秒）"
             ).forEach { (ms, label) ->
@@ -412,42 +422,6 @@ fun SettingsTabContent(
 
         // 4. 设备维护（原首页「全部功能」列表下放，按类归入设置 Tab）
         FeatureCard(
-            title = "快捷开关",
-            subtitle = "蜂窝数据 / 漫游 / 指示灯 · 点击切换"
-        ) {
-            var msg by remember { mutableStateOf("") }
-            var msgErr by remember { mutableStateOf(false) }
-            QuickToggleRow("数据开关", "切换蜂窝数据连接") {
-                scope.launch {
-                    backend?.features?.toggleCellularData()
-                        ?.onSuccess { msg = "已切换数据开关" }
-                        ?.onFailure { msg = unsupportedOrMessage(it); msgErr = true }
-                }
-            }
-            Divider(color = iOSSeparator, thickness = 1.dp)
-            QuickToggleRow("网络漫游", "需某兴后台密码 · 点击尝试") {
-                scope.launch {
-                    backend?.features?.toggleRoaming()
-                        ?.onSuccess { msg = "已切换漫游" }
-                        ?.onFailure { msg = "漫游切换失败：需后台管理密码（机器背面）"; msgErr = true }
-                }
-            }
-            Divider(color = iOSSeparator, thickness = 1.dp)
-            QuickToggleRow("指示灯", "切换设备指示灯") {
-                scope.launch {
-                    backend?.features?.toggleIndicatorLight()
-                        ?.onSuccess { msg = "已切换指示灯" }
-                        ?.onFailure { msg = unsupportedOrMessage(it); msgErr = true }
-                }
-            }
-            if (msg.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                ResultMessage(msg, msgErr)
-            }
-        }
-
-        // 4. 设备维护（原首页「全部功能」列表下放，按类归入设置 Tab）
-        FeatureCard(
             title = "设备维护",
             subtitle = "固件升级与系统级维护（真实后台操作）"
         ) {
@@ -475,66 +449,9 @@ fun SettingsTabContent(
             Divider(color = iOSSeparator, thickness = 1.dp)
             FeatureRouteRow("插件系统", "插件市场与欢迎语") { onOpenFeature(FeatureRoute.PLUGIN) }
             Divider(color = iOSSeparator, thickness = 1.dp)
-            FeatureRouteRow("测速", "宽带测速（后端流式）") { onOpenFeature(FeatureRoute.SPEEDTEST) }
-            Divider(color = iOSSeparator, thickness = 1.dp)
             FeatureRouteRow("局域网管理", "DHCP / 黑白名单 / 客户端") { onOpenFeature(FeatureRoute.LAN) }
             Divider(color = iOSSeparator, thickness = 1.dp)
             FeatureRouteRow("SMB 共享", "局域网文件共享开关") { onOpenFeature(FeatureRoute.SAMBA) }
-        }
-
-        // 5.5 快捷开关（一键切换，无需二级页面）
-        GroupHeader("快捷开关")
-        FeatureCard {
-            IconToggleRow(Icons.Filled.Lock, Color(0xFF34C759), "电量转发", "电量信息主动推送到手机",
-                checked = powerForwardEnabled,
-                onCheckedChange = { v ->
-                    powerForwardEnabled = v
-                    scope.launch { runCatching { (backend as? UfiToolsBackend)?.p0?.setPowerForwardEnabled(v) } }
-                }
-            )
-            IconToggleRow(Icons.Filled.Lock, Color(0xFF34C759), "ADGuardHome", "广告过滤 DNS 服务",
-                checked = adguardRunning,
-                onCheckedChange = { v ->
-                    adguardRunning = v
-                    scope.launch {
-                        val ufi = backend as? UfiToolsBackend ?: return@launch
-                        if (v) runCatching { ufi.p2.startAdGuard() } else runCatching { ufi.p2.stopAdGuard() }
-                    }
-                }
-            )
-        }
-
-        // 5.6 快捷操作（点击直接执行）
-        GroupHeader("快捷操作")
-        FeatureCard {
-            IconRow(Icons.Filled.Call, Color(0xFF34C759), "推送测试", "主动推送一条测试消息",
-                trailing = { if (quickActionBusy == "push") { CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp) } }
-            ) {
-                if (quickActionBusy != null) return@IconRow
-                quickActionBusy = "push"
-                scope.launch {
-                    val ufi = backend as? UfiToolsBackend
-                    val result = runCatching { ufi?.p0?.sendForwardTest("", "星灵测试推送", false) }
-                    quickActionMsg = if (result.isSuccess) "测试推送已发送" else "发送失败：${result.exceptionOrNull()?.message}"
-                    quickActionBusy = null
-                }
-            }
-            IconRow(Icons.Filled.Refresh, Color(0xFF007AFF), "流量校准", "重置设备流量计数器",
-                trailing = { if (quickActionBusy == "calibrate") { CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp) } }
-            ) {
-                if (quickActionBusy != null) return@IconRow
-                quickActionBusy = "calibrate"
-                scope.launch {
-                    val result = runCatching { backend?.features?.calibrateFlow(null) }
-                    quickActionMsg = if (result.isSuccess) "流量已校准" else "校准失败：${result.exceptionOrNull()?.message}"
-                    quickActionBusy = null
-                }
-            }
-            IconRow(Icons.Filled.Refresh, Color(0xFFFF9500), "重启设备", "远程重启随身 WiFi",
-                trailing = { if (quickActionBusy == "reboot") { CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp) } }
-            ) {
-                showRebootConfirm = true
-            }
         }
 
         // 5.7 更多功能（需要二级页面配置）
@@ -544,7 +461,6 @@ fun SettingsTabContent(
             IconRow(Icons.Filled.List, Color(0xFF007AFF), "文件管理", "上传 / 下载 / 删除设备文件", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.FILE_MANAGER) }
             IconRow(Icons.Filled.Person, Color(0xFFAF52DE), "自定义插件源", "第三方插件仓库接入", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.CUSTOM_PLUGIN) }
             IconRow(Icons.Filled.Build, Color(0xFFFF9500), "CPU 核心控制", "核心开关 / 调频 / 调度策略", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.CPU_CONTROL) }
-            IconRow(Icons.Filled.Lock, Color(0xFF34C759), "电池停充", "充电上限百分比 / 停充开关", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.BATTERY_CHARGE) }
             IconRow(Icons.Filled.Refresh, Color(0xFF007AFF), "开机自启脚本", "init.d 脚本管理与运行", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.BOOT_SCRIPTS) }
             IconRow(Icons.Filled.DateRange, Color(0xFFFF9500), "Crontab 定时", "系统 crontab 表达式编辑", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.CRONTAB) }
             IconRow(Icons.Filled.Settings, Color(0xFF007AFF), "EasyTier 组网", "异地组网虚拟局域网", trailing = { ChevronRight() }) { onOpenFeature(FeatureRoute.EASYTIER) }
@@ -563,8 +479,10 @@ fun SettingsTabContent(
                         showRebootConfirm = false
                         quickActionBusy = "reboot"
                         scope.launch {
-                            runCatching { backend?.features?.rebootDevice() }
-                            quickActionMsg = "重启指令已发送"
+                            val r = runCatching { backend?.features?.rebootDevice() }
+                            quickActionMsg = if (r.exceptionOrNull() != null)
+                                "重启失败：${r.exceptionOrNull()?.message}"
+                            else "重启指令已下发，设备约 1~3 分钟恢复联网"
                             quickActionBusy = null
                         }
                     }) { Text("重启") }

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 星灵 (XingLing) · 设备后台适配层统一抽象
  *
  * 定义总览 / 信号 / 流量 / 设备信息等能力接口，物理实现（如 UFI-TOOLS
@@ -74,6 +74,15 @@ data class BackendSignalInfo(
 }
 
 /**
+ * 实时上下行速率（设备固件统计，非流量差值估算）。
+ * 单位：字节/秒（B/s），来自 ZTE goform realtime_rx_thrpt / realtime_tx_thrpt。
+ */
+data class RealtimeSpeed(
+    val rxBps: Long = 0,
+    val txBps: Long = 0
+)
+
+/**
  * 设备后台能力抽象。所有方法均为挂起函数，UI 侧通过轮询取值；
  * 失败返回 Result.failure，由调用方决定是重试、空态还是提示。
  */
@@ -99,6 +108,10 @@ interface DeviceBackend {
 
     /** 取指定区间蜂窝流量（字节） */
     suspend fun fetchCellularUsage(startTimeMs: Long, endTimeMs: Long): Result<Long>
+
+    /** 取设备固件统计的实时上下行速率（B/s，realtime_rx/tx_thrpt） */
+    suspend fun fetchRealtimeSpeed(): Result<RealtimeSpeed> =
+        Result.failure(UnsupportedOperationException("当前后台不支持实时速率"))
 
     /**
      * 高级功能（网络/设备/高级三批共 38 项）统一入口。

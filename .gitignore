@@ -28,3 +28,14 @@ GitHub参考项目/
 test_screens/
 桌面小组件参考/
 高级后台刷入文件 参考/
+
+# 敏感信息（绝不入库）
+密钥.txt
+密钥*.txt
+
+# 本机构建/参考副本与临时日志（不入库）
+ios星灵/
+output/
+新建文件夹/
+ios_build_log*.txt
+**/log.txt

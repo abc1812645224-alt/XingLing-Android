@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · 设备控制批页面（一）
  *  短信收发 · SMS 转发 · WiFi 热点 · 流量校准
  * 通过 goform 反代（SEND_SMS / setAccessPointInfo / FLOW_CALIBRATION_MANUAL）与 /api/sms_forward_* 真实调用。
@@ -109,8 +109,16 @@ fun SmsScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: () -> Un
                     if (phone.isBlank() || body.isBlank()) return@ActionButton
                     busy = true
                     scope.launch {
-                        feats?.sendSms(phone.trim(), body)
-                            ?.onSuccess { msg = "短信已发送至 $phone"; msgErr = false }
+                        // 自动补齐 +86，排除 100xx 这种运营商短号
+                        val finalPhone = phone.trim().let { 
+                            if (!it.startsWith("+86") && !it.startsWith("100") && it.length >= 11) {
+                                if (it.startsWith("86")) "+$it" else "+86$it"
+                            } else {
+                                it
+                            }
+                        }
+                        feats?.sendSms(finalPhone, body)
+                            ?.onSuccess { msg = "短信已发送至 $finalPhone"; msgErr = false }
                             ?.onFailure { e -> msg = unsupportedOrMessage(e); msgErr = true }
                         busy = false
                     }
@@ -633,7 +641,17 @@ fun CalibrateScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: ()
     LaunchedEffect(Unit) {
         feats?.getDataLimit()?.onSuccess { d ->
             limitEnabled = d.enabled
-            limitGb = d.maxLimit
+            // d.maxLimit 为字节，回填到 GB 输入框需做 字节→GB 换算（否则会显示一长串字节数）
+            limitGb = run {
+                val bytes = d.maxLimit.trim().toLongOrNull() ?: -1L
+                if (bytes <= 0L) {
+                    "0"
+                } else {
+                    val gb = bytes / 1073741824.0
+                    if (gb % 1.0 == 0.0) gb.toLong().toString()
+                    else "%.2f".format(gb).trimEnd('0').trimEnd('.')
+                }
+            }
             limitPeriod = d.period
             limitForward = d.statusForwardEnabled
             limitLoaded = true
@@ -735,16 +753,22 @@ fun CalibrateScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: ()
                 onClick = {
                     limitBusy = true
                     scope.launch {
+                        // 输入为 GB，官方 data_flow_max_limit 单位是字节：GB × 1024^4；关闭/0 传 -1
+                        val gbValue = limitGb.trim().toDoubleOrNull() ?: 0.0
+                        val limitBytes =
+                            if (limitEnabled && gbValue > 0.0) (gbValue * 1073741824.0).toLong() else -1L
                         feats?.setDataLimit(
                             DataLimit(
                                 enabled = limitEnabled,
-                                maxLimit = limitGb.ifBlank { "0" },
+                                maxLimit = limitBytes.toString(),
                                 period = limitPeriod,
                                 checkReference = "system",
                                 statusForwardEnabled = limitForward
                             )
                         )?.onSuccess {
-                            msg = "流量限额已保存（上限 ${limitGb.ifBlank { "0" }} GB / $limitPeriod）"
+                            msg = if (limitEnabled && gbValue > 0.0)
+                                "流量限额已保存（上限 ${limitGb.ifBlank { "0" }} GB / $limitPeriod，达到后设备将自动断网）"
+                            else "流量限额已关闭（不限制）"
                             msgErr = false
                         }?.onFailure { e -> msg = unsupportedOrMessage(e); msgErr = true }
                         limitBusy = false

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · UFI-TOOLS 高级功能实现
  *
  * 将功能清单中的高级功能项全部接入真实后台：
@@ -474,7 +474,12 @@ class UfiToolsFeatureApi(
     }
 
     override suspend fun listTasks(): Result<List<ScheduledTask>> = runCatching {
-        val arr = JSONArray(api.get("/api/list_tasks"))
+        val raw = api.get("/api/list_tasks")
+        val arr = if (raw.trim().startsWith("{")) {
+            JSONObject(raw).optJSONArray("tasks") ?: JSONArray()
+        } else {
+            JSONArray(raw)
+        }
         (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
             val action = o.optJSONObject("actionMap") ?: o.optJSONObject("action") ?: JSONObject()

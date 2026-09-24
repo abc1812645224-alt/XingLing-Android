@@ -22,35 +22,79 @@
 
 package com.xingling.app.backend
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 class UfiToolsGoform(
     private val api: UfiToolsApi,
     private val token: String,
     /** ZTE（官方后台）专用口令：连接页可单独填写，留空则复用后台口令 */
-    private val zteToken: String = ""
+    private val zteToken: String = "",
+    /** 会话隔离键：同一台设备（host:port）即使 new 出多个客户端，也共享一把登录锁与会话 */
+    private val sessionKey: String = "default"
 ) {
 
     /** ZTE 登录口令：单独填写为空时复用 UFI-TOOLS 后台口令 */
     private val ztePassword: String get() = zteToken.ifBlank { token }
 
-    private var session: String? = null
+    private val state get() = sessionState(sessionKey)
+
+    /** 登录失败冷却（指数退避，避免错误口令被反复提交触发官方后台锁定） */
+    private fun loginCooldownMs(failCount: Int): Long = when {
+        failCount <= 0 -> 0L
+        failCount == 1 -> 30_000L
+        failCount == 2 -> 60_000L
+        failCount == 3 -> 120_000L
+        failCount == 4 -> 180_000L
+        else -> 300_000L
+    }
 
     private suspend fun currentSession(): String {
-        session?.let { return it }
-        // 1) 尝试读取 UFI-TOOLS 持久化的官方后台会话
-        val saved = readSavedCookie()
-        if (saved.isNotBlank()) {
-            if (isSessionAlive(saved)) {
-                session = saved
-                return saved
+        state.cookie?.let { return it }
+        return state.mutex.withLock {
+            // 双检：等待锁期间可能已由其他协程/其他客户端实例完成登录
+            state.cookie?.let { return@withLock it }
+
+            // 登录失败冷却期内直接拒绝，不再向官方后台提交口令
+            if (state.failAtMs > 0) {
+                val remain = loginCooldownMs(state.failCount) -
+                    (System.currentTimeMillis() - state.failAtMs)
+                if (remain > 0) {
+                    throw IllegalStateException(
+                        "官方后台口令疑似错误，已暂停登录 ${remain / 1000 + 1} 秒（防止触发“密码错误多次”锁定）。" +
+                            "请在设备连接配置中核对 ZTE 官方后台口令（默认常为 admin）。"
+                    )
+                }
             }
-            clearSavedCookie()
+
+            // 1) 尝试读取 UFI-TOOLS 持久化的官方后台会话（网页端登录后可直接复用，不抢占）
+            val saved = readSavedCookie()
+            if (saved.isNotBlank() && isSessionAlive(saved)) {
+                state.cookie = saved
+                state.failAtMs = 0
+                return@withLock saved
+            }
+            if (saved.isNotBlank()) clearSavedCookie()
+
+            // 2) 无有效会话 → 串行登录（同设备全局唯一一处提交口令）
+            try {
+                val fresh = login()
+                state.cookie = fresh
+                state.failAtMs = 0
+                state.failCount = 0
+                fresh
+            } catch (e: Throwable) {
+                state.failCount++
+                state.failAtMs = System.currentTimeMillis()
+                throw e
+            }
         }
-        // 2) 无有效会话 → 重新登录
-        val fresh = login()
-        session = fresh
-        return fresh
+    }
+
+    /** 会话失效（被踢/重启）后清空缓存，下次请求重新走串行登录 */
+    private fun invalidateSession() {
+        state.cookie = null
     }
 
     private suspend fun readSavedCookie(): String = runCatching {
@@ -168,8 +212,9 @@ class UfiToolsGoform(
         // 1) 取 LD 随机数
         val ldJson = goformGetRaw("LD", null)
         val ld = JSONObject(ldJson).optString("LD", "")
-        // 2) password = SHA256(SHA256(口令) + LD)
-        val pwdHex = sha256Hex(token.toByteArray(Charsets.UTF_8))
+        // 2) password = SHA256(SHA256(ZTE官方后台口令) + LD)
+        //    注意：必须用 ztePassword（ZTE 专用口令），不能用 token（UFI-TOOLS 口令）
+        val pwdHex = sha256Hex(ztePassword.toByteArray(Charsets.UTF_8))
         val password = sha256Hex((pwdHex + ld).toByteArray(Charsets.UTF_8))
         // 3) POST LOGIN_MULTI_USER（新式登录）
         val form = buildString {
@@ -197,11 +242,30 @@ class UfiToolsGoform(
         return sessionCookie
     }
 
-    /** 读操作：cmd 逗号拼接，返回原始 JSON 文本 */
+    /** 读操作：cmd 逗号拼接，返回原始 JSON 文本。
+     *  会话失效（被网页端挤掉/设备重启）时清空会话并串行重登一次，仅一次；
+     *  网络层异常不触发重登，避免不可达时反复提交口令。 */
     suspend fun goformGet(cmd: String, cookieOverride: String? = null): String {
-        val c = cookieOverride ?: currentSession()
+        if (cookieOverride != null) return rawGoformGet(cmd, cookieOverride)
+        val text = rawGoformGet(cmd, currentSession())
+        if (looksUnauthenticated(text)) {
+            invalidateSession()
+            return rawGoformGet(cmd, currentSession())
+        }
+        return text
+    }
+
+    private suspend fun rawGoformGet(cmd: String, cookie: String): String {
         val path = "/api/goform/goform_get_cmd_process?isTest=false&cmd=${urlEncode(cmd)}&multi_data=1&_=${System.currentTimeMillis()}"
-        return api.get(path, extraHeaders = cookieHeader(c), timeout = 20000)
+        return api.get(path, extraHeaders = cookieHeader(cookie), timeout = 20000)
+    }
+
+    /** 响应是否像“未登录”：空体、非 JSON（登录页 HTML）、loginfo=timeout */
+    private fun looksUnauthenticated(text: String?): Boolean {
+        val t = text?.trim().orEmpty()
+        if (t.isEmpty()) return true
+        if (!t.startsWith("{")) return true
+        return t.contains("\"loginfo\":\"timeout\"") || t.equals("{\"loginfo\":\"\"}")
     }
 
     /**
@@ -232,7 +296,6 @@ class UfiToolsGoform(
             append("&AD=").append(ad)
         }
         val headers = cookieHeader(c).toMutableMap()
-        headers["authorization"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         return api.postForm(
             "/api/goform/goform_set_cmd_process",
             form,
@@ -241,17 +304,84 @@ class UfiToolsGoform(
         )
     }
 
-    /** 写操作便捷方法：校验 result == "success" */
+    /** 重启 / 关机类 goformId：设备常在回包前就断网断电，需对连接中断做乐观判定 */
+    private val powerGoformIds = setOf("REBOOT_DEVICE", "SHUTDOWN_DEVICE")
+
+    /**
+     * 写操作便捷方法：校验 result == "success"。
+     * 与读路径 goformGet 对齐：会话失效（cookie 过期 / 被网页端挤掉 / 设备重启过）时清空会话、
+     * 重新登录并重试一次。此前写路径没有这层重试，一旦缓存会话失效，所有 set 指令都会静默失败，
+     * 表现为“重启 / 关机 / 性能模式点击无反应”。
+     * 重启 / 关机在设备断连（空响应 / 代理错误）时视为指令已下发，不当作失败。
+     */
     suspend fun writeChecked(goformId: String, params: Map<String, String>) {
-        val text = write(goformId, params)
+        val power = goformId in powerGoformIds
+        var text = firstAttempt(goformId, params, power)
+        // 首次尝试判定为会话失效（set 返回登录页 / result=3 / timeout，或取 AD 的 RD 时拿到非 JSON）
+        // → 清空会话重新登录后再试一次。
+        if (text == null || needsReauth(text)) {
+            invalidateSession()
+            text = secondAttempt(goformId, params, power)
+        }
+        evaluateWrite(text, power)
+    }
+
+    /** 首次写：电源命令遇到网络断连返回空串（设备可能已开始重启/关机）；
+     *  取版本号 / RD 时拿到登录页等非 JSON（JSONException）返回 null，作为“需要重登”信号。 */
+    private suspend fun firstAttempt(goformId: String, params: Map<String, String>, power: Boolean): String? =
+        try {
+            write(goformId, params)
+        } catch (e: java.io.IOException) {
+            if (power) "" else throw e
+        } catch (e: org.json.JSONException) {
+            null
+        }
+
+    /** 重登后的第二次写：currentSession() 会重新登录，登录失败直接抛出；电源命令仍容忍断连 */
+    private suspend fun secondAttempt(goformId: String, params: Map<String, String>, power: Boolean): String =
+        try {
+            write(goformId, params)
+        } catch (e: java.io.IOException) {
+            if (power) "" else throw e
+        }
+
+    /** 统一判定写结果 */
+    private fun evaluateWrite(text: String, power: Boolean) {
         val body = text.trim()
         if (body.startsWith("{")) {
-            val result = JSONObject(body).optString("result", "")
-            if (result == "3") throw IllegalStateException("官方后台密码错误（result=3）")
+            val j = JSONObject(body)
+            if (j.has("error")) {
+                throw IllegalStateException("后台报错：${j.optString("error")}")
+            }
+            val result = j.optString("result", "")
+            if (result == "3") throw IllegalStateException("官方后台密码错误（result=3），请核对 ZTE 官方后台口令")
             if (result.isNotBlank() && result != "success") {
                 throw IllegalStateException("后台操作未成功：result=$result")
             }
+            return
         }
+        // 非 JSON 响应
+        if (power) return // 重启/关机：设备通常在返回 success 前就断开连接（空体/代理错误），按已下发处理
+        if (body.isBlank()) throw IllegalStateException("后台无响应，请确认设备在线后重试")
+        throw IllegalStateException("后台未返回有效结果（可能未登录官方后台）：${body.take(120)}")
+    }
+
+    /** 响应是否明确指向“会话失效需重登”：result=3/timeout，或登录页 HTML / loginfo=timeout。
+     *  空体与 "Proxy error: ..." 不算登录页（对电源命令那是设备断连），不触发重登，避免重复下发重启。 */
+    private fun needsReauth(text: String): Boolean {
+        val r = jsonResult(text)
+        if (r == "3" || r == "timeout") return true
+        val b = text.trim()
+        if (b.startsWith("{")) return false
+        return b.contains("login", ignoreCase = true) || b.contains("\"loginfo\":\"timeout\"")
+    }
+
+    /** 取 JSON 响应里的 result 字段；非 JSON / 无 result 返回 null */
+    private fun jsonResult(text: String): String? {
+        val b = text.trim()
+        if (!b.startsWith("{")) return null
+        val j = runCatching { JSONObject(b) }.getOrNull() ?: return null
+        return j.optString("result", "").ifBlank { null }
     }
 
     /** 计算 AD：SHA256( SHA256(wa_inner_version + cr_version) + RD ) */
@@ -278,11 +408,22 @@ class UfiToolsGoform(
     }
 
     companion object {
+        /** 同一台设备共享的登录状态：互斥锁 + 会话 cookie + 失败冷却（跨多个客户端实例） */
+        class SessionState {
+            val mutex = Mutex()
+            @Volatile var cookie: String? = null
+            @Volatile var failAtMs: Long = 0
+            @Volatile var failCount: Int = 0
+        }
+        private val sessionStates = java.util.concurrent.ConcurrentHashMap<String, SessionState>()
+        private fun sessionState(key: String): SessionState =
+            sessionStates.computeIfAbsent(key) { SessionState() }
+
         private fun sha256(data: ByteArray): ByteArray =
             java.security.MessageDigest.getInstance("SHA-256").digest(data)
 
         private fun sha256Hex(data: ByteArray): String =
-            sha256(data).joinToString("") { "%02x".format(it) }
+            sha256(data).joinToString("") { "%02x".format(it) }.uppercase()
 
         private fun urlEncode(v: String): String =
             java.net.URLEncoder.encode(v, "UTF-8")

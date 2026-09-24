@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.xingling.app.R
+import com.xingling.app.ui.theme.iOSBackground
 import com.xingling.app.ui.theme.iOSBlue
 import com.xingling.app.ui.theme.iOSLabel
 import com.xingling.app.ui.theme.iOSSecondaryLabel
@@ -114,6 +116,8 @@ fun WidgetPreviewScreen(onBack: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(iOSBackground)
+            .statusBarsPadding()
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -247,13 +251,17 @@ private fun WidePreview(s: WidgetSnapshot, onRefresh: () -> Unit) {
                     color = cLabel
                 )
                 Spacer(Modifier.width(7.dp))
-                LineIcon(R.drawable.ic_widget_battery, if (s.charging) cGreen else cLabel, 16.dp)
+                LineIcon(R.drawable.ic_widget_battery, if (s.charging) cGreen else cLabel, 19.dp)
                 Spacer(Modifier.width(2.dp))
                 Text(
-                    if (s.battery >= 0) "${s.battery}%" else "--",
-                    fontSize = 11.sp,
+                    when {
+                        s.battery < 0 -> "--"
+                        s.charging -> "⚡${s.battery}%"
+                        else -> "${s.battery}%"
+                    },
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    color = cLabel
+                    color = if (s.charging) cGreen else cLabel
                 )
             }
         }
@@ -277,7 +285,7 @@ private fun WidePreview(s: WidgetSnapshot, onRefresh: () -> Unit) {
         Spacer(Modifier.height(7.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            MetricPill(R.drawable.ic_widget_carrier, cBlue, s.carrier)
+            MetricPill(R.drawable.ic_widget_carrier, cBlue, carrierWithNet(s.carrier, s.netType))
             PillGap()
             MetricPill(R.drawable.ic_widget_clients, cPurple, clientsText(s.clients))
             PillGap()
@@ -289,9 +297,9 @@ private fun WidePreview(s: WidgetSnapshot, onRefresh: () -> Unit) {
         Spacer(Modifier.height(5.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            MetricPill(R.drawable.ic_widget_wifi, cGreen, "WiFi ${s.wifiBand}")
+            MetricPill(R.drawable.ic_widget_signal, cGreen, s.band.uppercase())
             PillGap()
-            MetricPill(R.drawable.ic_widget_net, cBlue, s.netType)
+            MetricPill(R.drawable.ic_widget_net, cBlue, qciText(s.qci))
             PillGap()
             MetricPill(R.drawable.ic_widget_memory, cCyan, WidgetFormat.percent(s.memUsage))
             PillGap()
@@ -351,38 +359,42 @@ private fun CompactPreview(s: WidgetSnapshot, onRefresh: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            LineIcon(R.drawable.ic_widget_battery, if (s.charging) cGreen else cLabel, 13.dp)
+            LineIcon(R.drawable.ic_widget_battery, if (s.charging) cGreen else cLabel, 15.dp)
             Spacer(Modifier.width(2.dp))
             Text(
-                if (s.battery >= 0) "${s.battery}%" else "--",
-                fontSize = 10.sp,
+                when {
+                    s.battery < 0 -> "--"
+                    s.charging -> "⚡${s.battery}%"
+                    else -> "${s.battery}%"
+                },
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = cLabel
+                color = if (s.charging) cGreen else cLabel
             )
         }
 
         Spacer(Modifier.height(5.dp))
 
-        // 今日流量卡（本月流量收在卡内右下，卡片 wrap 内容不拉伸）
-        Column(
+        // 今日与本月流量精致并排卡片
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .background(cPillBg)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("今日流量", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = cBlue)
-            Spacer(Modifier.height(2.dp))
-            FlowBig(s.dailyBytes, big = 20.sp, unitSize = 10.sp)
-            Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "本月 ${flowJoined(s.monthlyBytes)}",
-                    fontSize = 9.sp,
-                    color = cSecondary,
-                    maxLines = 1
-                )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("今日流量", fontSize = 9.sp, fontWeight = FontWeight.Medium, color = cBlue)
+                Spacer(Modifier.height(2.dp))
+                FlowBig(s.dailyBytes, big = 16.sp, unitSize = 9.sp)
+            }
+            Box(modifier = Modifier.width(1.dp).height(24.dp).background(cSecondary.copy(alpha = 0.3f)))
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("本月流量", fontSize = 9.sp, fontWeight = FontWeight.Medium, color = cLabel)
+                Spacer(Modifier.height(2.dp))
+                FlowBig(s.monthlyBytes, big = 16.sp, unitSize = 9.sp)
             }
         }
 
@@ -525,6 +537,28 @@ private fun flowJoined(bytes: Long): String {
 }
 
 private fun clientsText(n: Int): String = if (n < 0) "--" else "$n 台"
+
+/** 运营商简称 + 网络制式：「中国移动」+「5G」→「移动5G」 */
+private fun carrierWithNet(carrier: String, netType: String): String {
+    val short = when {
+        carrier.contains("移动") -> "移动"
+        carrier.contains("联通") -> "联通"
+        carrier.contains("电信") -> "电信"
+        carrier.contains("广电") -> "广电"
+        carrier.isBlank() || carrier == "--" -> ""
+        else -> carrier
+    }
+    val net = netType.takeIf { it.isNotBlank() && it != "--" }.orEmpty()
+    return when {
+        short.isNotEmpty() -> "$short$net"
+        net.isNotEmpty() -> net
+        else -> "--"
+    }
+}
+
+/** QCI 等级胶囊文案 */
+private fun qciText(qci: String): String =
+    "QCI " + (qci.takeIf { it.isNotBlank() && it != "未知" && it != "--" } ?: "--")
 
 @Composable
 private fun signalColor(bars: Int): Color = colorResource(

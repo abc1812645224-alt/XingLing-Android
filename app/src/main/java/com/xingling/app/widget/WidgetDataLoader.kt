@@ -47,7 +47,8 @@ object WidgetDataLoader {
      *  导致受登录态保护的站点列表回空（小组件设备数恒显示 0）。 */
     private const val GOFORM_FIELDS =
         "model_name,network_provider,network_type,network_signalbar,battery_value,battery_charging," +
-            "Z5g_rsrp,snr,RSRQ,sms_unread_num,Nr_bands,Lte_bands,station_list,lan_station_list"
+            "Z5g_rsrp,snr,RSRQ,sms_unread_num,Nr_bands,Lte_bands,station_list,lan_station_list," +
+            "network_information"
 
     /** WiFi 当前频点（root 权限，失败即 "未知"） */
     private const val WIFI_FREQ_CMD =
@@ -87,7 +88,7 @@ object WidgetDataLoader {
         val zteToken = store.zteToken
 
         val api = UfiToolsApi(UfiToolsApiFactory.baseUrl(host, port), token)
-        val goform = UfiToolsGoform(api, token, zteToken)
+        val goform = UfiToolsGoform(api, token, zteToken, "$host:$port")
         val backend = UfiToolsBackend(host, port, token, zteToken)
 
         // 三路并行取数，各自超时，互不阻塞。
@@ -125,6 +126,28 @@ object WidgetDataLoader {
                 ?: WidgetSnapshot(configured = true, updateAt = now, stale = true)
         }
 
+        val prefsCustom = context.getSharedPreferences("XingLingPrefs", android.content.Context.MODE_PRIVATE)
+
+        // 应用本地流量设置与超额关网
+        var adjustedOverview = overview
+        if (adjustedOverview != null) {
+            val limitEnabled = if (prefsCustom.contains("local_data_limit_enabled")) prefsCustom.getBoolean("local_data_limit_enabled", false) else adjustedOverview.dataLimitEnabled
+            val limitMaxBytes = if (prefsCustom.contains("local_data_limit_max_bytes")) prefsCustom.getLong("local_data_limit_max_bytes", -1L) else adjustedOverview.dataLimitMaxBytes
+            val offset = prefsCustom.getLong("local_traffic_offset_bytes", 0L)
+            
+            adjustedOverview = adjustedOverview.copy(
+                dataLimitEnabled = limitEnabled,
+                dataLimitMaxBytes = limitMaxBytes,
+                monthlyBytes = if (adjustedOverview.monthlyBytes >= 0) adjustedOverview.monthlyBytes + offset else -1L,
+                dailyBytes = if (adjustedOverview.dailyBytes >= 0) adjustedOverview.dailyBytes + offset else -1L
+            )
+            
+            if (limitEnabled && limitMaxBytes > 0 && adjustedOverview.monthlyBytes >= limitMaxBytes) {
+                // 超额关网
+                runCatching { backend.features.toggleCellularData() }
+            }
+        }
+
         // 已连接设备数（无线 station_list + 有线 lan_station_list，按 MAC 去重）
         val clients = clientsCount(goformJson)
 
@@ -148,7 +171,7 @@ object WidgetDataLoader {
             }
         }
 
-        val deviceName = overview?.model?.takeIf { it.isNotBlank() && it != "未知设备" }
+        val deviceName = adjustedOverview?.model?.takeIf { it.isNotBlank() && it != "未知设备" }
             ?: textOf(goformJson, "model_name")
             ?: "星灵设备"
 
@@ -163,35 +186,46 @@ object WidgetDataLoader {
 
         val netType = normNetType(textOf(goformJson, "network_type") ?: atNetType)
 
-        val band = bandText(
-            textOf(goformJson, "Nr_bands"),
-            textOf(goformJson, "Lte_bands"),
-            atBand
-        )
+        // U30 Air 固件平铺 Nr_bands 返回空，真实值在 network_information 嵌套对象里
+        val ni = runCatching {
+            when (val raw = goformJson?.opt("network_information")) {
+                null -> null
+                is JSONObject -> raw
+                is String -> if (raw.isBlank()) null else JSONObject(raw)
+                else -> null
+            }
+        }.getOrNull()
+        val nrRaw = textOf(goformJson, "Nr_bands")
+            ?: ni?.optString("Nr_bands")?.takeIf { it.isNotBlank() && it != "-1" }
+        val lteRaw = textOf(goformJson, "Lte_bands")
+            ?: ni?.optString("Lte_bands")?.takeIf { it.isNotBlank() && it != "-1" }
+
+        val band = bandText(nrRaw, lteRaw, atBand)
 
         val battery = when {
-            overview != null && overview.battery >= 0 -> overview.battery
+            adjustedOverview != null && adjustedOverview.battery >= 0 -> adjustedOverview.battery
             else -> intOf(goformJson, "battery_value") ?: -1
         }
 
-        val charging = (overview?.isCharging ?: false) || textOf(goformJson, "battery_charging") == "1"
+        val charging = (adjustedOverview?.isCharging ?: false) || textOf(goformJson, "battery_charging") == "1"
 
         val snapshot = WidgetSnapshot(
             configured = true,
             deviceName = deviceName,
-            version = overview?.appVer?.takeIf { it.isNotBlank() && it != "--" } ?: "",
+            version = adjustedOverview?.appVer?.takeIf { it.isNotBlank() && it != "--" } ?: "",
             signalBars = signalBars,
             battery = battery,
             charging = charging,
-            dailyBytes = overview?.dailyBytes ?: -1L,
-            monthlyBytes = overview?.monthlyBytes ?: -1L,
+            dailyBytes = adjustedOverview?.dailyBytes ?: -1L,
+            monthlyBytes = adjustedOverview?.monthlyBytes ?: -1L,
             carrier = carrier,
             netType = netType,
             band = band,
-            cpuUsage = overview?.cpuUsage ?: -1f,
-            cpuTemp = overview?.cpuTemp ?: -1f,
+            qci = adjustedOverview?.qci?.takeIf { it.isNotBlank() && it != "未知" } ?: "--",
+            cpuUsage = adjustedOverview?.cpuUsage ?: -1f,
+            cpuTemp = adjustedOverview?.cpuTemp ?: -1f,
             wifiBand = wifiBand(shellText),
-            memUsage = overview?.memUsage ?: -1f,
+            memUsage = adjustedOverview?.memUsage ?: -1f,
             rsrp = rsrp,
             snr = snr,
             smsUnread = intOf(goformJson, "sms_unread_num") ?: -1,
@@ -241,19 +275,54 @@ object WidgetDataLoader {
         else -> raw
     }
 
-    /** 频段：NR 优先（N41），否则 LTE（B3），再否则 AT 解析结果 */
+    /**
+     * 频段：NR 在前 LTE 在后，多载波用 + 连接。
+     * 单载波：N78；NR 载波聚合：N78+N41；NSA 双连接：N78+B3。
+     * goform 的 Nr_bands/Lte_bands 在聚合时可能以逗号/分号/空格/加号等分隔多个频段号，
+     * 统一提取全部数字，去重保序；goform 无结果时回退 AT 通道已格式化的文本。
+     */
     private fun bandText(nrBands: String?, lteBands: String?, atBand: String): String {
-        val nr = nrBands?.trim()
-        if (nr != null && Regex("^[0-9]+$").matches(nr)) return "N$nr"
-        val lte = lteBands?.trim()
-        if (lte != null && Regex("^[0-9]+$").matches(lte)) return "B$lte"
-        return atBand.takeIf { it.isNotBlank() } ?: "--"
+        val nrParts = bandNumbers(nrBands).map { "N$it" }
+        val lteParts = bandNumbers(lteBands).map { "B$it" }
+        val merged = (nrParts + lteParts).distinct()
+        if (merged.isNotEmpty()) return merged.joinToString("+")
+        return normalizeAtBand(atBand)
     }
 
-    /** WiFi 频点 → 5G / 2.4G（无频点则 --） */
+    /**
+     * AT 通道兜底文本规范化：fetchSignalInfo 在 U30 Air 上返回 "n"+Nr_bands 原文，
+     * 聚合时可能是 "n78,41"，统一成 N78+N41；已是 N78/B3 的文本按原样大写。
+     */
+    private fun normalizeAtBand(atBand: String): String {
+        val raw = atBand.trim()
+        if (raw.isBlank()) return "--"
+        val nums = bandNumbers(raw)
+        if (nums.isEmpty()) return raw.uppercase()
+        val lower = raw.lowercase()
+        val isLte = lower.startsWith("b") || lower.contains("lte") || lower.startsWith("d")
+        val prefix = if (isLte && !lower.contains("nr") && !lower.contains("n")) "B" else "N"
+        return nums.joinToString("+") { "$prefix$it" }
+    }
+
+    /** 从形如 "78"、"78,41"、"78; 41"、"78+41" 的字符串提取全部频段号（保序去重） */
+    private fun bandNumbers(raw: String?): List<Int> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return Regex("[0-9]+")
+            .findAll(raw)
+            .mapNotNull { it.value.toIntOrNull() }
+            .filter { it in 1..256 }
+            .distinct()
+            .toList()
+    }
+
+    /** WiFi 频点 → 6GHz / 5G / 2.4G（无频点则 --） */
     private fun wifiBand(shellOutput: String): String {
         val match = Regex("frequency=\\s*(\\d+)").find(shellOutput) ?: return "--"
         val mhz = match.groupValues[1].toIntOrNull() ?: return "--"
-        return if (mhz >= 4000) "5G" else "2.4G"
+        return when {
+            mhz >= 5925 -> "6GHz"
+            mhz >= 4000 -> "5G"
+            else -> "2.4G"
+        }
     }
 }

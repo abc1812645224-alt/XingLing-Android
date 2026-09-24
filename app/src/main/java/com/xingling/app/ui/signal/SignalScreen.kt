@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing)
  * Copyright (C) 2026 XingLing Project
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -45,6 +45,7 @@ import com.xingling.app.signal.SignalMetrics
 import com.xingling.app.signal.SystemMetrics
 import com.xingling.app.signal.TrafficMetrics
 import com.xingling.app.ui.theme.iOSBackground
+import com.xingling.app.ui.theme.iOSCardBackground
 import com.xingling.app.ui.theme.iOSBlue
 import com.xingling.app.ui.theme.iOSGreen
 import com.xingling.app.ui.theme.iOSLabel
@@ -143,20 +144,20 @@ private fun SignalMetricRow(cell: CellInfo) {
         SignalMetric(Modifier.weight(1f), "BAND", bandLabel(cell), iOSBlue)
         SignalMetric(
             Modifier.weight(1f),
-            "RSRP",
-            if (cell.rsrp != Int.MIN_VALUE) "${cell.rsrp} dBm" else "--",
+            "RSRP(dBm)",
+            if (cell.rsrp != Int.MIN_VALUE) "${cell.rsrp}" else "--",
             rsrpColor(cell.rsrp)
         )
         SignalMetric(
             Modifier.weight(1f),
-            "SINR",
-            if (cell.sinr != Int.MIN_VALUE) "${cell.sinr} dB" else "--",
+            "SINR(dB)",
+            if (cell.sinr != Int.MIN_VALUE) "${cell.sinr}" else "--",
             sinrColor(cell.sinr)
         )
         SignalMetric(
             Modifier.weight(1f),
-            "RSRQ",
-            if (cell.rsrq != Int.MIN_VALUE) "${cell.rsrq} dB" else "--",
+            "RSRQ(dB)",
+            if (cell.rsrq != Int.MIN_VALUE) "${cell.rsrq}" else "--",
             rsrqColor(cell.rsrq)
         )
     }
@@ -193,11 +194,11 @@ private fun CompactCellCard(content: @Composable ColumnScope.() -> Unit) {
             .fillMaxWidth()
             .padding(vertical = 4.dp),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = iOSCardBackground),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
     ) {
         Column(
-            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 9.dp),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
             content = content
         )
     }
@@ -240,7 +241,7 @@ private fun CardTitle(
 private fun PrimaryCellCard(cell: CellInfo, ccCount: Int) {
     CompactCellCard {
         CardTitle(iOSGreen, Icons.Filled.Check, "主载波", cellDetail(cell, ccCount = ccCount))
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         SignalMetricRow(cell)
     }
 }
@@ -288,7 +289,7 @@ private fun SecondaryCellCard(cell: CellInfo) {
 private fun NeighborCellCard(cell: CellInfo) {
     CompactCellCard {
         CardTitle(iOSOrange, Icons.Filled.Info, "邻小区", cellDetail(cell))
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         SignalMetricRow(cell)
     }
 }

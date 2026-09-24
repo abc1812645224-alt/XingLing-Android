@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" android:compileSdkVersion="34" android:compileSdkVersionCodename="14" package="com.xingling.app" platformBuildVersionCode="34" platformBuildVersionName="14">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
@@ -16,6 +16,7 @@
     <!-- 读取 DhcpInfo 网关，用于设备扫描时优先探测网关 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <!-- 前台服务：桌面小组件亮屏高频刷新（Android 14+ 短时前台服务） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SHORT_SERVICE"/>
@@ -91,6 +92,27 @@
                 <action android:name="android.intent.action.SCREEN_ON" />
                 <action android:name="android.intent.action.SCREEN_OFF" />
                 <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
+        </receiver>
+        <!-- 开机 / App 升级 / 厂商快速开机：重建小组件刷新调度并立即刷新 -->
+        <receiver
+            android:name="com.xingling.app.widget.WidgetBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.miui.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- AlarmManager 兜底闹钟：进程被杀后系统仍可派发并拉起取数 -->
+        <receiver
+            android:name="com.xingling.app.widget.WidgetAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.xingling.app.widget.action.ALARM_REFRESH" />
             </intent-filter>
         </receiver>
     </application>

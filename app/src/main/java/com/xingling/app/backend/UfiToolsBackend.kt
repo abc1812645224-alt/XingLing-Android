@@ -28,7 +28,10 @@ class UfiToolsBackend(
 
     private val api = UfiToolsApi(UfiToolsApiFactory.baseUrl(hostName, port), token)
 
-    private val goform = UfiToolsGoform(api, token, zteToken)
+    private val goform = UfiToolsGoform(api, token, zteToken, "$host:$port")
+
+    private var lastMonthlyDlBytes: Long = -1L
+    private var lastMonthlyUlBytes: Long = -1L
 
     /** 高级功能（网络/设备/高级三批 38 项）真实实现 */
     override val features: DeviceFeatures by lazy {
@@ -77,7 +80,38 @@ class UfiToolsBackend(
                 ulMaxMbps = m.groupValues[4].toIntOrNull()?.let { it / 1000 } ?: -1
             }
         }
-        ov.copy(qci = qciStr, dlMaxMbps = dlMaxMbps, ulMaxMbps = ulMaxMbps).let { base ->
+        // 当月上下行分流流量 + 流量上限：baseDeviceInfo 只有合计 monthly_data，
+        // 分项需从 goform monthly_rx_bytes(接收=下行) / monthly_tx_bytes(发送=上行) 取；
+        // 流量上限为 data_volume_limit_size，格式 "数值_每单位MB系数"（GB 时系数=1024）
+        var monthlyDl = ov.monthlyDlBytes
+        var monthlyUl = ov.monthlyUlBytes
+        var limitEnabled = ov.dataLimitEnabled
+        var limitBytes = ov.dataLimitMaxBytes
+        runCatching {
+            val f = goform.read("monthly_rx_bytes,monthly_tx_bytes")
+            fun gstr(key: String) = f.optString(key).trim()
+                .takeIf { it.isNotBlank() && it != "--" && !it.equals("null", true) }
+            gstr("monthly_rx_bytes")?.toLongOrNull()?.let { monthlyDl = it; lastMonthlyDlBytes = it }
+            gstr("monthly_tx_bytes")?.toLongOrNull()?.let { monthlyUl = it; lastMonthlyUlBytes = it }
+            
+        }.onFailure {
+            if (lastMonthlyDlBytes >= 0) monthlyDl = lastMonthlyDlBytes
+            if (lastMonthlyUlBytes >= 0) monthlyUl = lastMonthlyUlBytes
+        }
+        runCatching {
+            // 使用高级后台的流量限制
+            val limitObj = features.getDataLimit().getOrNull()
+            if (limitObj != null) {
+                limitEnabled = limitObj.enabled
+                val parsed = limitObj.maxLimit.toLongOrNull() ?: -1L
+                if (parsed > 0) limitBytes = parsed
+            }
+        }
+        ov.copy(
+            qci = qciStr, dlMaxMbps = dlMaxMbps, ulMaxMbps = ulMaxMbps,
+            monthlyDlBytes = monthlyDl, monthlyUlBytes = monthlyUl,
+            dataLimitEnabled = limitEnabled, dataLimitMaxBytes = limitBytes
+        ).let { base ->
             val (bTemp, bCap) = readBatteryInfo()
             var uptime = -1L
             runCatching {
@@ -114,6 +148,36 @@ class UfiToolsBackend(
             // {"result":"success","usage":"123456789"}
             JSONObject(text).optString("usage", "-1").toLongOrNull() ?: -1L
         }
+
+    /**
+     * 实时上下行速率：ZTE goform realtime_rx_thrpt / realtime_tx_thrpt，
+     * 固件按自身统计窗口直接给出（B/s），比轮询流量计数器差值更准且天然分上下行。
+     */
+    override suspend fun fetchRealtimeSpeed(): Result<RealtimeSpeed> = runCatching {
+        val j = goform.read("realtime_rx_thrpt,realtime_tx_thrpt,realtime_time")
+        val rx = parseThrpt(j, "realtime_rx_thrpt")
+        val tx = parseThrpt(j, "realtime_tx_thrpt")
+        RealtimeSpeed(rxBps = rx, txBps = tx)
+    }
+
+    /** thrpt 字段兼容数字/带单位字符串，统一解析为 B/s（空、--、非法值按 0） */
+    private fun parseThrpt(j: JSONObject, key: String): Long {
+        val raw = j.opt(key)?.toString()?.trim().orEmpty()
+        if (raw.isBlank() || raw == "--" || raw.equals("null", true)) return 0L
+        // 纯数字直接用（固件口径为 B/s）
+
+        raw.toLongOrNull()?.let { return it.coerceAtLeast(0L) }
+        // 带单位兜底（如 "1.5MB/S"、"800KB/S"）
+        val num = Regex("[0-9]+(\\.[0-9]+)?").find(raw)?.value?.toDoubleOrNull() ?: return 0L
+        val lower = raw.lowercase()
+        val factor = when {
+            lower.contains("gb") -> 1073741824.0
+            lower.contains("mb") -> 1048576.0
+            lower.contains("kb") -> 1024.0
+            else -> 1.0
+        }
+        return (num * factor).toLong().coerceAtLeast(0L)
+    }
 
     private fun JSONObject.toOverview(): BackendOverview {
         val tempList = optString("cpu_temp_list").takeIf { it.isNotBlank() && it != "null" }

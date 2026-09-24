@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 星灵 (XingLing) · 桌面小组件后台周期刷新（分层策略最底层）
  *
  * 系统 updatePeriodMillis（30 分钟）作为系统级兜底保留；
@@ -30,9 +30,19 @@ class WidgetRefreshWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext
+        // 自愈：国产 ROM 可能清掉 AlarmManager 闹钟，每次 Worker 跑都补挂一次
+        runCatching { WidgetAlarmScheduler.schedule(app) }
         val previous = WidgetSnapshotStore.read(app)
         val fresh = runCatching { WidgetDataLoader.load(app, commit = false) }.getOrNull()
-        if (fresh != null && WidgetRefreshPolicy.shouldRepaint(previous, fresh)) {
+        // 取数失败（网络不通/设备不在线）：交给 WorkManager 退避重试，
+        // 避免进程死后调度链彻底断掉；未配置设备则不重试。
+        if (fresh == null) {
+            val configured = runCatching {
+                com.xingling.app.backend.DeviceStore(app).configured
+            }.getOrDefault(false)
+            return if (configured) Result.retry() else Result.success()
+        }
+        if (WidgetRefreshPolicy.shouldRepaint(previous, fresh)) {
             WidgetSnapshotStore.write(app, fresh)
             WidgetRefreshPolicy.repaint(app)
         }

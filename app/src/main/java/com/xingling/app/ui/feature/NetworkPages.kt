@@ -425,6 +425,44 @@ fun BandsScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: () -> 
             )
         }
 
+        FeatureCard(
+            title = "快捷提速组合",
+            subtitle = "自动勾选对应运营商的高速频段（需手动点击下方应用）"
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlineActionButton(
+                    text = "电信/联通",
+                    modifier = Modifier.weight(1f),
+                    color = iOSBlue,
+                    onClick = {
+                        selected = setOf(1, 78)
+                        lteSelected = setOf(1, 3)
+                        lteInput = lteSelected.sorted().joinToString(",")
+                    }
+                )
+                OutlineActionButton(
+                    text = "移动",
+                    modifier = Modifier.weight(1f),
+                    color = iOSBlue,
+                    onClick = {
+                        selected = setOf(41, 79)
+                        lteSelected = setOf(3, 39, 41)
+                        lteInput = lteSelected.sorted().joinToString(",")
+                    }
+                )
+                OutlineActionButton(
+                    text = "广电",
+                    modifier = Modifier.weight(1f),
+                    color = iOSBlue,
+                    onClick = {
+                        selected = setOf(41)
+                        lteSelected = setOf(3, 39, 41)
+                        lteInput = lteSelected.sorted().joinToString(",")
+                    }
+                )
+            }
+        }
+
         if (panel == 0) {
             FeatureCard(title = "NR 锁频", subtitle = "勾选上方频段后点击应用") {
                 ActionButton(
@@ -594,6 +632,11 @@ fun CellLockScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: () 
     var loaded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    var manualPci by remember { mutableStateOf("") }
+    var manualEarfcn by remember { mutableStateOf("") }
+    var manualRat by remember { mutableStateOf("LTE") }
+    var manualLockBusy by remember { mutableStateOf(false) }
+
     suspend fun refresh() {
         feats?.neighborCells()?.onSuccess { neighbors = it }
         feats?.lockedCells()?.onSuccess { locked = it }
@@ -644,6 +687,55 @@ fun CellLockScreen(backend: DeviceBackend?, onBack: () -> Unit, onAddDevice: () 
                     }
                 }
             }
+        }
+
+        // 手动锁基站
+        FeatureCard(
+            title = "手动锁基站 (PCI / EARFCN)",
+            subtitle = "直接输入目标小区的 PCI 与 EARFCN 频点进行锁定"
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FeatureTextField(
+                    value = manualPci,
+                    onValueChange = { manualPci = it },
+                    label = "PCI (0~1007)",
+                    placeholder = "例如: 12",
+                    modifier = Modifier.weight(1f)
+                )
+                FeatureTextField(
+                    value = manualEarfcn,
+                    onValueChange = { manualEarfcn = it },
+                    label = "EARFCN 频点",
+                    placeholder = "例如: 37900",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedSelectTab(manualRat == "LTE", "4G LTE") { manualRat = "LTE" }
+                OutlinedSelectTab(manualRat == "NR", "5G NR") { manualRat = "NR" }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            ActionButton(
+                text = "手动锁定基站",
+                loading = manualLockBusy,
+                onClick = {
+                    val pci = manualPci.trim().toIntOrNull()
+                    val earfcn = manualEarfcn.trim().toIntOrNull()
+                    if (pci == null || earfcn == null) {
+                        msg = "请正确输入 PCI 与 EARFCN 数字"
+                        msgErr = true
+                    } else {
+                        manualLockBusy = true
+                        scope.launch {
+                            feats?.lockCell(pci, earfcn, manualRat)
+                                ?.onSuccess { msg = "已锁定 $manualRat PCI=$pci EARFCN=$earfcn"; msgErr = false; refresh() }
+                                ?.onFailure { e -> msg = unsupportedOrMessage(e); msgErr = true }
+                            manualLockBusy = false
+                        }
+                    }
+                }
+            )
         }
 
         FeatureCard(

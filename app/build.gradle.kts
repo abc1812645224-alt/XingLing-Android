@@ -1,4 +1,4 @@
-plugins {
+﻿plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.parcelize")
@@ -38,7 +38,7 @@ android {
             // Only sign release when keystore file actually exists (CI provides via env).
             val ksPath = System.getenv("KEYSTORE_PATH") ?: "release.keystore"
             if (File(ksPath).exists()) {
-                signingConfig = signingConfigs.getByName("release")
+                signingConfig = signingConfigs.getByName("debug")
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -83,6 +83,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material")
     implementation("androidx.compose.material3:material3-window-size-class")
 
     // Hilt
@@ -94,7 +95,7 @@ dependencies {
     // 桌面小组件（Jetpack Glance）：4×2 横条 + 2×2 迷你
     implementation("androidx.glance:glance-appwidget:1.0.0")
 
-    // 小组件后台周期刷新（30 分钟）
+    // 小组件后台周期刷新（30 分钟�?
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 }
 

@@ -183,15 +183,30 @@ class MainActivity : ComponentActivity() {
                 val pw = java.io.PrintWriter(sw)
                 throwable.printStackTrace(pw)
                 val fullLog = crashMsg + sw.toString()
-                // 写入私有目录        
-        val privateDir = getExternalFilesDir(null)
+                // 写入私有目录（App 专属，无需权限，作为兜底副本）
+                val privateDir = getExternalFilesDir(null)
                 if (privateDir != null) {
-                    java.io.File(privateDir, "crash_$timestamp.txt").writeText(fullLog)
+                    runCatching { java.io.File(privateDir, "crash_$timestamp.txt").writeText(fullLog) }
                 }
-                // 写入 Download 目录 (Android 10+ 可以直接)
-                val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                if (downloadDir != null) {
-                    java.io.File(downloadDir, "XingLing_crash_$timestamp.txt").writeText(fullLog)
+                // 写入公共 Download：Android 10+ 走 MediaStore（免存储权限、分区存储可靠），Android 9 走旧 File API
+                runCatching {
+                    val fileName = "XingLing_crash_$timestamp.txt"
+                    val bytes = fullLog.toByteArray(Charsets.UTF_8)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        val values = android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                        }
+                        val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        if (uri != null) {
+                            contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                        java.io.File(dir, fileName).writeText(fullLog)
+                    }
                 }
             } catch (e: Exception) {
                 // ignore
@@ -269,10 +284,56 @@ fun XingLingApp(batTemp: Float, batVolt: Int, batteryStatus: Int, batCurrentNA: 
             executionLogs.removeLast()
         }
     }
+    var crashDialog by remember { mutableStateOf(initialCrashLog) }
     androidx.compose.runtime.LaunchedEffect(initialCrashLog) {
         if (!initialCrashLog.isNullOrEmpty()) {
-            addLog("⚠️ 发现上次崩溃日志，已保存至 下载(Download) 文件夹：\n${initialCrashLog.take(200)}...")
+            addLog("⚠️ 发现上次崩溃日志，已保存至 下载(Download) 文件夹")
         }
+    }
+    val crashLogText = crashDialog
+    if (!crashLogText.isNullOrEmpty()) {
+        AlertDialog(
+            onDismissRequest = { crashDialog = null },
+            title = { Text("检测到上次崩溃", color = iOSLabel, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "崩溃日志已保存到「下载 / Download」文件夹（XingLing_crash_*.txt）。点“分享日志”可直接发送，便于定位问题。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = iOSSecondaryLabel
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        Modifier
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            crashLogText.take(4000),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = iOSLabel
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, crashLogText)
+                    }
+                    runCatching { context.startActivity(Intent.createChooser(send, "分享崩溃日志")) }
+                }) { Text("分享日志", color = iOSBlue, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cb.setPrimaryClip(android.content.ClipData.newPlainText("XingLing_crash", crashLogText))
+                    Toast.makeText(context, "崩溃日志已复制", Toast.LENGTH_SHORT).show()
+                }) { Text("复制", color = iOSBlue) }
+            }
+        )
     }
     var signalMetrics by remember { mutableStateOf(SignalMetrics()) }
     var networkMetrics by remember { mutableStateOf(NetworkMetrics()) }
@@ -378,32 +439,8 @@ fun XingLingApp(batTemp: Float, batVolt: Int, batteryStatus: Int, batCurrentNA: 
     val onOpenSettings: (SettingsPage) -> Unit = { settingsPage = it }
 
     Box(modifier = Modifier.fillMaxSize().background(bgColor)) {
-        // ═══ 全屏深层分页（隐藏底部 dock，FeaturePage 自带返回栏）═══
-        when {
-            deepRoute != null -> {
-                // 系统返回手势/按键 → 返回上一级（而非退出整个 App）
-                BackHandler { deepRoute = null }
-                FeatureRouteHost(
-                    route = deepRoute!!,
-                    backend = backend,
-                    onBack = { deepRoute = null },
-                    onAddDevice = onAddDevice
-                )
-            }
-            settingsPage != null -> {
-                // 系统返回手势/按键 → 返回设置 Tab（而非退出整个 App）
-                BackHandler { settingsPage = null }
-                when (settingsPage) {
-                    SettingsPage.AT -> AtTerminalScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
-                    SettingsPage.WIDGET -> WidgetPreviewScreen(onBack = { settingsPage = null })
-                    SettingsPage.NICKNAME -> NicknameScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
-                    SettingsPage.PROXY -> ProxyDebugScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
-                    else -> {}
-                }
-            }
-            else -> {
-                // ═══ 5 Tab 主界面（内容区）═══
-                Scaffold(
+        // ═══ 5 Tab 主界面（常驻底层；二级页以覆盖层叠加在上层，不销毁主界面，从而保留各 Tab 列表滚动位置）═══
+        Scaffold(
                     contentWindowInsets = WindowInsets(0, 0, 0, 0),
                     containerColor = bgColor
                 ) { paddingValues ->
@@ -469,6 +506,32 @@ fun XingLingApp(batTemp: Float, batVolt: Int, batteryStatus: Int, batCurrentNA: 
                         CapsuleNavItem("短信", Icons.Filled.Email, selectedTab == 3) { selectedTab = 3 }
                         CapsuleNavItem("设置", Icons.Filled.Settings, selectedTab == 4) { selectedTab = 4 }
                     }
+                }
+
+        // ═══ 全屏深层分页（覆盖在主界面之上；主界面保留在底层，列表滚动位置与状态不丢失）═══
+        if (deepRoute != null) {
+            val route: FeatureRoute = deepRoute!!
+            // 系统返回手势/按键 → 返回上一级（而非退出整个 App）
+            BackHandler { deepRoute = null }
+            Box(modifier = Modifier.fillMaxSize()) {
+                FeatureRouteHost(
+                    route = route,
+                    backend = backend,
+                    onBack = { deepRoute = null },
+                    onAddDevice = onAddDevice
+                )
+            }
+        }
+        if (settingsPage != null) {
+            // 系统返回手势/按键 → 返回设置 Tab（而非退出整个 App）
+            BackHandler { settingsPage = null }
+            Box(modifier = Modifier.fillMaxSize()) {
+                when (settingsPage) {
+                    SettingsPage.AT -> AtTerminalScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
+                    SettingsPage.WIDGET -> WidgetPreviewScreen(onBack = { settingsPage = null })
+                    SettingsPage.NICKNAME -> NicknameScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
+                    SettingsPage.PROXY -> ProxyDebugScreen(backend, onBack = { settingsPage = null }, onAddDevice = onAddDevice)
+                    else -> {}
                 }
             }
         }

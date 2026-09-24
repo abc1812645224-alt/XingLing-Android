@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · 功能导航中枢
  *
  * 总览一屏 → 深层分页：从设备总览页的「功能」入口卡片进入，
@@ -92,7 +92,6 @@ enum class FeatureRoute(val title: String, val group: FeatureGroup, val desc: St
     PUSH_TEST("推送测试", FeatureGroup.DEVICE, "主动推送一条测试消息"),
     CUSTOM_PLUGIN("自定义插件源", FeatureGroup.ADVANCED, "第三方插件仓库接入"),
     CPU_CONTROL("CPU 核心控制", FeatureGroup.ADVANCED, "核心开关 / 调频 / 调度策略"),
-    BATTERY_CHARGE("电池停充", FeatureGroup.DEVICE, "充电上限百分比 / 停充开关"),
     BOOT_SCRIPTS("开机自启脚本", FeatureGroup.ADVANCED, "init.d 脚本管理与运行"),
     CRONTAB("Crontab 定时", FeatureGroup.ADVANCED, "系统 crontab 表达式编辑"),
     ADGUARD("ADGuardHome", FeatureGroup.ADVANCED, "广告过滤 DNS 服务管理"),
@@ -212,7 +211,6 @@ fun FeatureRouteHost(
         FeatureRoute.PUSH_TEST -> PushTestScreen(backend, onBack, onAddDevice)
         FeatureRoute.CUSTOM_PLUGIN -> CustomPluginScreen(backend, onBack, onAddDevice)
         FeatureRoute.CPU_CONTROL -> CpuControlScreen(backend, onBack, onAddDevice)
-        FeatureRoute.BATTERY_CHARGE -> BatteryChargeScreen(backend, onBack, onAddDevice)
         FeatureRoute.BOOT_SCRIPTS -> BootScriptsScreen(backend, onBack, onAddDevice)
         FeatureRoute.CRONTAB -> CrontabScreen(backend, onBack, onAddDevice)
         FeatureRoute.ADGUARD -> AdGuardScreen(backend, onBack, onAddDevice)

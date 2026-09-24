@@ -21,7 +21,6 @@ import androidx.glance.Image
 import androidx.glance.ImageProvider
 import androidx.glance.action.actionStartActivity
 import androidx.glance.action.clickable
-import androidx.glance.appwidget.action.actionRunCallback
 import androidx.glance.appwidget.cornerRadius
 import androidx.glance.background
 import androidx.glance.layout.Alignment
@@ -70,7 +69,6 @@ private val IconNet = R.drawable.ic_widget_net
 private val IconClients = R.drawable.ic_widget_clients
 private val IconMemory = R.drawable.ic_widget_memory
 private val IconSms = R.drawable.ic_widget_sms
-private val IconRefresh = R.drawable.ic_widget_refresh
 
 @Composable
 fun XingLingWidgetSurface(snapshot: WidgetSnapshot, compact: Boolean) {
@@ -138,17 +136,23 @@ private fun WideBody(s: WidgetSnapshot) {
         ) {
             Text(
                 text = s.deviceName,
-                style = TextStyle(color = ColorProvider(Label), fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                style = TextStyle(color = ColorProvider(Label), fontSize = 15.sp, fontWeight = FontWeight.Bold),
                 maxLines = 1
             )
             if (s.version.isNotBlank()) {
-                Spacer(GlanceModifier.width(6.dp))
+                Spacer(GlanceModifier.width(4.dp))
                 Text(
                     text = s.version,
-                    style = TextStyle(color = ColorProvider(Tertiary), fontSize = 9.sp),
+                    style = TextStyle(color = ColorProvider(Tertiary), fontSize = 10.sp),
                     maxLines = 1
                 )
             }
+            Spacer(GlanceModifier.width(4.dp))
+            Text(
+                text = (if (s.stale) "缓存 " else "") + WidgetFormat.timeText(s.updateAt),
+                style = TextStyle(color = ColorProvider(Tertiary), fontSize = 9.sp),
+                maxLines = 1
+            )
         }
         Spacer(GlanceModifier.width(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -156,15 +160,23 @@ private fun WideBody(s: WidgetSnapshot) {
             Spacer(GlanceModifier.width(2.dp))
             Text(
                 text = if (s.signalBars >= 0) "${s.signalBars}" else "--",
-                style = TextStyle(color = ColorProvider(Label), fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                style = TextStyle(color = ColorProvider(Label), fontSize = 12.sp, fontWeight = FontWeight.Bold),
                 maxLines = 1
             )
             Spacer(GlanceModifier.width(7.dp))
-            LineIcon(IconBattery, if (s.charging) Green else Label, 16.dp)
+            BatteryIcon(s.battery, s.charging)
             Spacer(GlanceModifier.width(2.dp))
             Text(
-                text = if (s.battery >= 0) "${s.battery}%" else "--",
-                style = TextStyle(color = ColorProvider(Label), fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                text = when {
+                    s.battery < 0 -> "--"
+                    s.charging -> "⚡${s.battery}%"
+                    else -> "${s.battery}%"
+                },
+                style = TextStyle(
+                    color = ColorProvider(if (s.charging) Green else Label),
+                    fontSize = 13.sp,
+                      fontWeight = FontWeight.Bold
+                ),
                 maxLines = 1
             )
         }
@@ -172,20 +184,24 @@ private fun WideBody(s: WidgetSnapshot) {
 
     Spacer(GlanceModifier.height(7.dp))
 
-    // ── 行2：今日 / 本月流量（超大数字 + 竖分隔） ──
+    // ── 第二行：今日 / 本月流量（精致卡片 + 竖分隔） ──
     Row(
-        modifier = GlanceModifier.fillMaxWidth(),
+        modifier = GlanceModifier
+            .fillMaxWidth()
+            .background(ColorProvider(PillBg))
+            .cornerRadius(14.dp)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         FlowColumn("今日流量", s.dailyBytes, GlanceModifier.defaultWeight())
-        Spacer(GlanceModifier.width(8.dp))
+        Spacer(GlanceModifier.width(12.dp))
         Box(
             modifier = GlanceModifier
                 .width(1.dp)
                 .height(32.dp)
                 .background(ColorProvider(Separator))
         ) {}
-        Spacer(GlanceModifier.width(8.dp))
+        Spacer(GlanceModifier.width(12.dp))
         FlowColumn("本月流量", s.monthlyBytes, GlanceModifier.defaultWeight())
     }
 
@@ -196,67 +212,33 @@ private fun WideBody(s: WidgetSnapshot) {
         modifier = GlanceModifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        MetricPill(IconCarrier, Blue, s.carrier)
+        MetricPill(IconCarrier, Blue, carrierWithNet(s.carrier, s.netType))
         PillGap()
-        MetricPill(IconClients, Purple, clientsText(s.clients))
+        MetricPill(IconClients, Purple, "设备 " + clientsText(s.clients))
         PillGap()
-        MetricPill(IconCpu, Orange, WidgetFormat.percent(s.cpuUsage))
+        MetricPill(IconCpu, Orange, "CPU ${WidgetFormat.percent(s.cpuUsage)}")
         PillGap()
-        MetricPill(IconTemp, Red, "${WidgetFormat.tempCelsius(s.cpuTemp)}°")
+        MetricPill(IconTemp, Red, "温度 ${WidgetFormat.tempCelsius(s.cpuTemp)}°")
     }
 
     Spacer(GlanceModifier.height(5.dp))
 
-    // ── 行4：指标胶囊行2 ──
+    // ── 行4：指标胶囊行2（蜂窝频段 / QCI / 内存 / 短信）──
     Row(
         modifier = GlanceModifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        MetricPill(IconWifi, Green, "WiFi ${s.wifiBand}")
+        // 蜂窝频段（N78 / B8 / N78+B3 等），无频段时降级显示 WiFi 频点
+        MetricPill(IconSignal, Green, "频段 " + bandPillText(s.band, s.wifiBand))
         PillGap()
-        MetricPill(IconNet, Blue, s.netType)
+        MetricPill(IconNet, Blue, WidgetFormat.rsrpText(s.rsrp))
         PillGap()
-        MetricPill(IconMemory, Cyan, WidgetFormat.percent(s.memUsage))
+        MetricPill(IconMemory, Cyan, "内存 ${WidgetFormat.percent(s.memUsage)}")
         PillGap()
-        MetricPill(IconSms, Orange, WidgetFormat.unreadText(s.smsUnread),
+        MetricPill(IconSms, Orange, "短信 ${WidgetFormat.unreadText(s.smsUnread)}",
             badgeIconRes = if (s.smsUnread > 0) R.drawable.ic_widget_sms_badge else null)
     }
 
-    Spacer(GlanceModifier.height(6.dp))
-
-    // ── 行5：信号详情 + 时间 + 圆形刷新按钮 ──
-    Row(
-        modifier = GlanceModifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        LineIcon(IconSignal, Blue, 12.dp)
-        Spacer(GlanceModifier.width(3.dp))
-        Text(
-            text = "RSRP ${WidgetFormat.numText(s.rsrp)}dBm · SNR ${WidgetFormat.numText(s.snr)}",
-            modifier = GlanceModifier.defaultWeight(),
-            style = TextStyle(color = ColorProvider(Secondary), fontSize = 9.sp),
-            maxLines = 1
-        )
-        Spacer(GlanceModifier.width(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = (if (s.stale) "缓存 " else "") + WidgetFormat.timeText(s.updateAt),
-                style = TextStyle(color = ColorProvider(Tertiary), fontSize = 9.sp),
-                maxLines = 1
-            )
-            Spacer(GlanceModifier.width(5.dp))
-            Box(
-                modifier = GlanceModifier
-                    .size(22.dp)
-                    .background(ColorProvider(PillBg))
-                    .cornerRadius(11.dp)
-                    .clickable(actionRunCallback<WidgetRefreshAction>()),
-                contentAlignment = Alignment.Center
-            ) {
-                LineIcon(IconRefresh, Green, 12.dp)
-            }
-        }
-    }
 }
 
 // ══════════════════════════════════════════════════
@@ -270,7 +252,7 @@ private fun CompactBody(s: WidgetSnapshot) {
             modifier = GlanceModifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LineIcon(IconRouter, Blue, 14.dp)
+            LineIcon(IconRouter, Blue, 13.dp)
             Spacer(GlanceModifier.width(4.dp))
             Text(
                 text = s.deviceName,
@@ -278,44 +260,72 @@ private fun CompactBody(s: WidgetSnapshot) {
                 style = TextStyle(color = ColorProvider(Label), fontSize = 12.sp, fontWeight = FontWeight.Bold),
                 maxLines = 1
             )
-            LineIcon(IconBattery, if (s.charging) Green else Label, 13.dp)
+            BatteryIcon(s.battery, s.charging)
             Spacer(GlanceModifier.width(2.dp))
             Text(
-                text = if (s.battery >= 0) "${s.battery}%" else "--",
-                style = TextStyle(color = ColorProvider(Label), fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                text = when {
+                    s.battery < 0 -> "--"
+                    s.charging -> "⚡${s.battery}%"
+                    else -> "${s.battery}%"
+                },
+                style = TextStyle(
+                    color = ColorProvider(if (s.charging) Green else Label),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                ),
                 maxLines = 1
             )
         }
 
-        Spacer(GlanceModifier.height(5.dp))
+        Spacer(GlanceModifier.height(4.dp))
 
-        // 今日流量卡（内含本月流量，wrap 内容高度不拉伸）
-        Column(
-            modifier = GlanceModifier
-                .fillMaxWidth()
-                .background(ColorProvider(PillBg))
-                .cornerRadius(14.dp)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
+        // 流量卡片：今日 与 本月 左右精致卡片并排，避免互相挤占
+        Row(
+            modifier = GlanceModifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "今日流量",
-                style = TextStyle(color = ColorProvider(Blue), fontSize = 10.sp, fontWeight = FontWeight.Medium),
-                maxLines = 1
-            )
-            Spacer(GlanceModifier.height(2.dp))
-            FlowBig(s.dailyBytes, 20.sp, unitSize = 10.sp)
-            Spacer(GlanceModifier.height(4.dp))
-            Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Spacer(GlanceModifier.defaultWeight())
-                Text(
-                    text = "本月 ${flowJoined(s.monthlyBytes)}",
-                    style = TextStyle(color = ColorProvider(Secondary), fontSize = 9.sp),
-                    maxLines = 1
-                )
+            // 左卡片：今日流量
+            Box(
+                modifier = GlanceModifier.defaultWeight()
+                    .background(ColorProvider(PillBg))
+                    .cornerRadius(12.dp)
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "今日流量",
+                        style = TextStyle(color = ColorProvider(Blue), fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                        maxLines = 1
+                    )
+                    Spacer(GlanceModifier.height(3.dp))
+                    FlowBig(s.dailyBytes, 18.sp, unitSize = 10.sp)
+                }
+            }
+
+            Spacer(GlanceModifier.width(6.dp))
+
+            // 右卡片：本月流量
+            Box(
+                modifier = GlanceModifier.defaultWeight()
+                    .background(ColorProvider(PillBg))
+                    .cornerRadius(12.dp)
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "本月流量",
+                        style = TextStyle(color = ColorProvider(Secondary), fontSize = 11.sp, fontWeight = FontWeight.Medium),
+                        maxLines = 1
+                    )
+                    Spacer(GlanceModifier.height(3.dp))
+                    FlowBig(s.monthlyBytes, 18.sp, unitSize = 10.sp)
+                }
             }
         }
 
-        Spacer(GlanceModifier.height(5.dp))
+        Spacer(GlanceModifier.height(4.dp))
 
         // 指标胶囊行1：已连接设备数 + RSRP
         Row(
@@ -327,7 +337,7 @@ private fun CompactBody(s: WidgetSnapshot) {
             MetricPill(IconSignal, Green, WidgetFormat.numText(s.rsrp))
         }
 
-        Spacer(GlanceModifier.height(4.dp))
+        Spacer(GlanceModifier.height(3.dp))
 
         // 指标胶囊行2：设备温度 + 短信
         Row(
@@ -340,31 +350,21 @@ private fun CompactBody(s: WidgetSnapshot) {
                 badgeIconRes = if (s.smsUnread > 0) R.drawable.ic_widget_sms_badge else null)
         }
 
-        Spacer(GlanceModifier.defaultWeight())
+        Spacer(GlanceModifier.height(4.dp))
 
-        // 底部：运营商 + 圆形刷新
+        // 底部：运营商（已按要求去掉绿色刷新按钮）
         Row(
             modifier = GlanceModifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             LineIcon(IconCarrier, Blue, 11.dp)
-            Spacer(GlanceModifier.width(2.dp))
+            Spacer(GlanceModifier.width(3.dp))
             Text(
-                text = s.carrier,
+                text = s.carrier.ifBlank { "中国电信" },
                 modifier = GlanceModifier.defaultWeight(),
-                style = TextStyle(color = ColorProvider(Secondary), fontSize = 9.sp),
+                style = TextStyle(color = ColorProvider(Secondary), fontSize = 11.sp, fontWeight = FontWeight.Medium),
                 maxLines = 1
             )
-            Box(
-                modifier = GlanceModifier
-                    .size(20.dp)
-                    .background(ColorProvider(PillBg))
-                    .cornerRadius(10.dp)
-                    .clickable(actionRunCallback<WidgetRefreshAction>()),
-                contentAlignment = Alignment.Center
-            ) {
-                LineIcon(IconRefresh, Green, 11.dp)
-            }
         }
     }
 }
@@ -383,7 +383,7 @@ private fun FlowColumn(title: String, bytes: Long, modifier: GlanceModifier = Gl
             maxLines = 1
         )
         Spacer(GlanceModifier.height(2.dp))
-        FlowBig(bytes, 30.sp)
+        FlowBig(bytes, 26.sp, unitSize = 11.sp)
     }
 }
 
@@ -448,7 +448,7 @@ private fun RowScope.MetricPill(
         Spacer(GlanceModifier.width(3.dp))
         Text(
             text = text,
-            style = TextStyle(color = ColorProvider(Label), fontSize = 10.sp, fontWeight = FontWeight.Medium),
+            style = TextStyle(color = ColorProvider(Label), fontSize = 11.sp, fontWeight = FontWeight.Medium),
             maxLines = 1
         )
     }
@@ -478,4 +478,83 @@ private fun signalColor(bars: Int): Int = when {
 }
 
 /** 已连接设备数文案 */
-private fun clientsText(n: Int): String = if (n < 0) "--" else "$n 台"
+private fun clientsText(n: Int): String = if (n < 0) "--" else "$n"
+
+/**
+ * 运营商简称 + 网络制式：「中国移动」+「5G」→「移动5G」。
+ * 去掉「中国」前缀，展示品牌核心字。
+ */
+private fun carrierWithNet(carrier: String, netType: String): String {
+    val short = when {
+        carrier.contains("移动") -> "移动"
+        carrier.contains("联通") -> "联通"
+        carrier.contains("电信") -> "电信"
+        carrier.contains("广电") -> "广电"
+        carrier.contains("China Mobile", ignoreCase = true) -> "移动"
+        carrier.contains("China Unicom", ignoreCase = true) -> "联通"
+        carrier.contains("China Telecom", ignoreCase = true) -> "电信"
+        carrier.isBlank() || carrier == "--" -> ""
+        else -> carrier.removePrefix("中国").trim()
+    }
+    val net = netType.takeIf { it.isNotBlank() && it != "--" }.orEmpty()
+    return when {
+        short.isNotEmpty() -> "$short$net"
+        net.isNotEmpty() -> net
+        else -> "--"
+    }
+}
+
+/**
+ * 频段胶囊文字：优先显示蜂窝频段（N78 / B8 / N78+B3），
+ * 无蜂窝频段时降级显示 WiFi 频点（如 5G / 2.4G）。
+ */
+private fun bandPillText(band: String, wifiBand: String): String {
+    val b = band.takeIf { it.isNotBlank() && it != "--" }
+    if (b != null) return b.uppercase()
+    val w = wifiBand.takeIf { it.isNotBlank() && it != "--" }
+    return if (w != null) "WiFi$w" else "--"
+}
+
+/** QCI 等级胶囊文案 */
+private fun qciText(qci: String): String =
+    "QCI " + (qci.takeIf { it.isNotBlank() && it != "未知" && it != "--" } ?: "--")
+
+/** 拟物风格动态电池图标 */
+@Composable
+private fun BatteryIcon(level: Int, charging: Boolean, modifier: GlanceModifier = GlanceModifier) {
+    val color = if (charging) Green else Label
+    val percent = level.coerceIn(0, 100) / 100f
+    val fillWidthDp = (22 * percent).dp
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+        Box(
+            modifier = GlanceModifier
+                .size(26.dp, 13.dp)
+                .background(ColorProvider(color))
+                .cornerRadius(3.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = GlanceModifier
+                    .size(24.dp, 11.dp)
+                    .background(ColorProvider(CardBg))
+                    .cornerRadius(2.dp)
+                    .padding(1.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (level > 0) {
+                    Box(
+                        modifier = GlanceModifier
+                            .size(fillWidthDp, 9.dp)
+                            .background(ColorProvider(color))
+                            .cornerRadius(1.dp)
+                    ) {}
+                }
+            }
+        }
+        Box(
+            modifier = GlanceModifier
+                .size(2.dp, 5.dp)
+                .background(ColorProvider(color))
+        ) {}
+    }
+}

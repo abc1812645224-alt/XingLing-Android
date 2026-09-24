@@ -28,6 +28,7 @@ data class WidgetSnapshot(
     val carrier: String = "--",
     val netType: String = "--",
     val band: String = "--",
+    val qci: String = "--",
     val cpuUsage: Float = -1f,
     val cpuTemp: Float = -1f,
     val wifiBand: String = "--",
@@ -51,6 +52,7 @@ data class WidgetSnapshot(
         .put("carrier", carrier)
         .put("netType", netType)
         .put("band", band)
+        .put("qci", qci)
         .put("cpuUsage", cpuUsage.toDouble())
         .put("cpuTemp", cpuTemp.toDouble())
         .put("wifiBand", wifiBand)
@@ -79,6 +81,7 @@ data class WidgetSnapshot(
                     carrier = o.optString("carrier", "--"),
                     netType = o.optString("netType", "--"),
                     band = o.optString("band", "--"),
+                    qci = o.optString("qci", "--"),
                     cpuUsage = o.optDouble("cpuUsage", -1.0).toFloat(),
                     cpuTemp = o.optDouble("cpuTemp", -1.0).toFloat(),
                     wifiBand = o.optString("wifiBand", "--"),

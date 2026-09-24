@@ -25,16 +25,22 @@ import androidx.core.content.ContextCompat
 class WidgetScreenStateReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
+        val app = context.applicationContext
         when (intent?.action) {
             Intent.ACTION_SCREEN_ON,
             Intent.ACTION_USER_PRESENT -> {
-                // 亮屏/解锁：当场刷一次 + 开启 15 秒轮询窗口（最多 3 分钟）
-                WidgetFastRefreshService.start(context)
+                // 亮屏/解锁：用 goAsync 当场取数刷新一次，绕过国产 ROM 对后台启动前台服务、
+                // WorkManager 的拦截/延迟，保证“点亮屏幕就能看到新数据”。
+                // 不再从后台广播启动 WidgetFastRefreshService：Android 12+ 后台 FGS 限制、
+                // Android 14 短服务配额会使 startForeground 无法在时限内完成，从而抛出
+                // ForegroundServiceDidNotStartInTimeException 崩溃。
+                val pending = goAsync()
+                WidgetImmediateRefresh.goAsyncRefresh(app, 5_000L) { pending.finish() }
             }
 
             Intent.ACTION_SCREEN_OFF -> {
-                // 熄屏：立即结束窗口
-                WidgetFastRefreshService.stop(context)
+                // 熄屏时无需强制杀服务，服务内部的 runWindow() 循环会通过 isScreenOn() 自行检测并在下一个周期安全退出。
+                // 这样可以避免由于 startForegroundService 后立刻 stopService 导致系统抛出 ForegroundServiceDidNotStartInTimeException 的致命异常。
             }
         }
     }

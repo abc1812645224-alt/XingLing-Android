@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · 设备总览页（真实数据流 · 图形化重构版）
  *
  * 数据来源：
@@ -15,6 +15,7 @@ package com.xingling.app.ui.overview
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
@@ -34,17 +35,26 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,12 +64,14 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -67,23 +79,28 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.xingling.app.backend.AccessControl
 import com.xingling.app.backend.BackendOverview
 import com.xingling.app.backend.BackendSignalInfo
 import com.xingling.app.backend.CpuCoreStat
+import com.xingling.app.backend.DataLimit
 import com.xingling.app.backend.DeviceBackend
+import com.xingling.app.backend.LanClient
+import com.xingling.app.backend.ScheduledTask
 import com.xingling.app.backend.WifiApInfo
 import com.xingling.app.signal.CellType
 import com.xingling.app.signal.DeviceMetrics
 import com.xingling.app.signal.SignalInfo
 import com.xingling.app.signal.SignalMetrics
 import com.xingling.app.ui.feature.FeatureRoute
-import com.xingling.app.ui.feature.QuickFeatureCard
 import com.xingling.app.ui.feature.StatusPill
 import com.xingling.app.ui.theme.GlassCard
+import com.xingling.app.ui.theme.iOSButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import com.xingling.app.ui.theme.iOSBlue
 import com.xingling.app.ui.theme.iOSCardBackground
@@ -99,6 +116,7 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 // ================= 设备总览页 =================
+@OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun OverviewScreen(
     backend: DeviceBackend?,
@@ -111,47 +129,154 @@ fun OverviewScreen(
         return
     }
 
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     var overview by remember { mutableStateOf<BackendOverview?>(null) }
     var signal by remember { mutableStateOf<BackendSignalInfo?>(null) }
     var loadedOnce by remember { mutableStateOf(false) }
     var lastError by remember { mutableStateOf<String?>(null) }
+    var showTrafficDialog by remember { mutableStateOf(false) }
 
     // 当日流量内存采样（最近 60 次）
     val dailyBytesHistory = remember { mutableStateListOf<Long>() }
     // CPU / 内存占用内存采样（最近 60 次）
     val cpuHistory = remember { mutableStateListOf<Float>() }
     val memHistory = remember { mutableStateListOf<Float>() }
-    // 实时网速计算：上一次字节计数与时间戳
+
+    // ---- 实时速率 ----
+    // 首选：固件 realtime_rx_thrpt / realtime_tx_thrpt（单位 B/s，与官方前端同口径）
+    // 回退：当日累计流量 daily_data 差值估算（固件不支持时）
+    var rxBps by remember { mutableLongStateOf(0L) }
+    var txBps by remember { mutableLongStateOf(0L) }
+    var txKnown by remember { mutableStateOf(false) }
+    var firmwareSpeed by remember { mutableStateOf(false) }
+    var fallbackBps by remember { mutableLongStateOf(0L) }
+    // 差值法回退用：上一次字节计数与时间戳
     var lastDailyBytes by remember { mutableLongStateOf(-1L) }
     var lastTickMs by remember { mutableLongStateOf(0L) }
-    var speedBps by remember { mutableLongStateOf(0L) }
+    // 固件速率 3 点滑动窗口，用于中位数平滑
+    val rxSamples = remember { mutableStateListOf<Long>() }
+    val txSamples = remember { mutableStateListOf<Long>() }
+    var hasDisconnectedForExceed by remember { mutableStateOf(false) }
+    var hasAttemptedBackendSync by remember { mutableStateOf(false) }
+
+    // 速率独立采样：与主轮询解耦，固定 1.5s 一采，避免被 fetchOverview 内的 AT/root 调用拖慢
+    LaunchedEffect(backend) {
+        var failStreak = 0
+        var zeroStreak = 0
+        while (true) {
+            backend?.fetchRealtimeSpeed()
+                ?.onSuccess { s ->
+                    failStreak = 0
+                    // 部分固件不实现 realtime_* 统计，字段存在但恒为 0：
+                    // 连续 3 次全 0 判定为不可用，回落差值估算，避免速率卡一直是 0
+                    if (s.rxBps <= 0L && s.txBps <= 0L) zeroStreak += 1 else zeroStreak = 0
+                    if (zeroStreak >= 3) {
+                        if (firmwareSpeed) {
+                            firmwareSpeed = false
+                            txKnown = false
+                            rxSamples.clear()
+                            txSamples.clear()
+                        }
+                    } else {
+                        if (!firmwareSpeed) {
+                            // 首次/恢复拿到固件数据：清空差值法残留窗口
+                            rxSamples.clear()
+                            txSamples.clear()
+                        }
+                        firmwareSpeed = true
+                        txKnown = true
+                        rxBps = smoothSpeed(rxSamples, s.rxBps)
+                        txBps = smoothSpeed(txSamples, s.txBps)
+                    }
+                }
+                ?.onFailure {
+                    // 单次失败不切换，连续 3 次失败才判定固件不支持 → 回落差值估算
+                    failStreak += 1
+                    if (failStreak >= 3 && firmwareSpeed) {
+                        firmwareSpeed = false
+                        txKnown = false
+                        rxSamples.clear()
+                        txSamples.clear()
+                    }
+                }
+            delay(SPEED_POLL_MS)
+        }
+    }
 
     LaunchedEffect(backend, pollIntervalMs) {
         while (true) {
             val now = System.currentTimeMillis()
             val ov = backend.fetchOverview()
-            ov.onSuccess {
-                overview = it
-                dailyBytesHistory.add(it.dailyBytes)
-                while (dailyBytesHistory.size > 60) dailyBytesHistory.removeAt(0)
-                if (it.cpuUsage >= 0f) {
-                    cpuHistory.add(it.cpuUsage)
-                    while (cpuHistory.size > 60) cpuHistory.removeAt(0)
+            ov.onSuccess { rawOv ->
+                val prefs = context.getSharedPreferences("XingLingPrefs", android.content.Context.MODE_PRIVATE)
+                val limitEnabled = if (prefs.contains("local_data_limit_enabled")) prefs.getBoolean("local_data_limit_enabled", false) else rawOv.dataLimitEnabled
+                val limitMaxBytes = if (prefs.contains("local_data_limit_max_bytes")) prefs.getLong("local_data_limit_max_bytes", -1L) else rawOv.dataLimitMaxBytes
+                val offset = prefs.getLong("local_traffic_offset_bytes", 0L)
+
+                val adjustedOv = rawOv.copy(
+                    dataLimitEnabled = limitEnabled,
+                    dataLimitMaxBytes = limitMaxBytes,
+                    monthlyBytes = if (rawOv.monthlyBytes >= 0) rawOv.monthlyBytes + offset else -1L,
+                    dailyBytes = if (rawOv.dailyBytes >= 0) rawOv.dailyBytes + offset else -1L
+                )
+
+                overview = adjustedOv
+                
+                if (limitEnabled && limitMaxBytes > 0 && adjustedOv.monthlyBytes >= limitMaxBytes) {
+                    if (!hasDisconnectedForExceed) {
+                        hasDisconnectedForExceed = true
+                        runCatching { backend.features.toggleCellularData() }
+                    }
+                } else {
+                    hasDisconnectedForExceed = false
                 }
-                if (it.memUsage >= 0f) {
-                    memHistory.add(it.memUsage)
-                    while (memHistory.size > 60) memHistory.removeAt(0)
-                }
-                // 计算实时速率（字节/秒）
-                if (lastDailyBytes >= 0 && lastTickMs > 0 && it.dailyBytes >= 0) {
-                    val dt = (now - lastTickMs) / 1000.0
-                    if (dt >= 1.0) {
-                        val db = it.dailyBytes - lastDailyBytes
-                        if (db >= 0) speedBps = (db / dt).toLong()
+                
+                // 双保险：静默同步本地配置到高级后台
+                if (prefs.contains("local_data_limit_max_bytes") && 
+                    (rawOv.dataLimitMaxBytes != limitMaxBytes || rawOv.dataLimitEnabled != limitEnabled)) {
+                    if (!hasAttemptedBackendSync) {
+                        hasAttemptedBackendSync = true
+                        launch {
+                            runCatching {
+                                backend.features.setDataLimit(
+                                    com.xingling.app.backend.DataLimit(
+                                        enabled = limitEnabled,
+                                        maxLimit = if (limitMaxBytes > 0) limitMaxBytes.toString() else "-1",
+                                        period = "monthly",
+                                        checkReference = "system",
+                                        statusForwardEnabled = limitEnabled
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
-                lastDailyBytes = it.dailyBytes
-                lastTickMs = now
+
+                dailyBytesHistory.add(adjustedOv.dailyBytes)
+                while (dailyBytesHistory.size > 60) dailyBytesHistory.removeAt(0)
+                if (adjustedOv.cpuUsage >= 0f) {
+                    cpuHistory.add(adjustedOv.cpuUsage)
+                    while (cpuHistory.size > 60) cpuHistory.removeAt(0)
+                }
+                if (adjustedOv.memUsage >= 0f) {
+                    memHistory.add(adjustedOv.memUsage)
+                    while (memHistory.size > 60) memHistory.removeAt(0)
+                }
+                // 差值法回退：仅在固件实时速率不可用时使用
+                // daily_data 为分钟级累计量，短窗差值天然粗糙，故不再作为主数据源
+                if (lastDailyBytes >= 0 && lastTickMs > 0 && adjustedOv.dailyBytes >= 0) {
+                    val dt = (now - lastTickMs) / 1000.0
+                    if (dt >= 1.0) {
+                        val db = adjustedOv.dailyBytes - lastDailyBytes
+                        if (db >= 0) fallbackBps = (db / dt).toLong()
+                    }
+                }
+                // 仅在计数有效时更新基线，避免 -1 覆盖基线导致后续速率永久停更
+                if (adjustedOv.dailyBytes >= 0) {
+                    lastDailyBytes = adjustedOv.dailyBytes
+                    lastTickMs = now
+                }
             }
             ov.onFailure { e -> lastError = e.message }
             backend.fetchSignalInfo().onSuccess { signal = it }
@@ -165,13 +290,49 @@ fun OverviewScreen(
     val signalMetrics = sg?.toSignalMetrics() ?: SignalMetrics()
     val deviceMetrics = ov?.toDeviceMetrics() ?: DeviceMetrics()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 120.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
+    val isRefreshing = remember { mutableStateOf(false) }
+    val pullRefreshState = rememberPullRefreshState(
+        refreshing = isRefreshing.value,
+        onRefresh = { isRefreshing.value = true }
+    )
+
+    LaunchedEffect(isRefreshing.value) {
+        if (isRefreshing.value) {
+            val now = System.currentTimeMillis()
+            val ovReq = backend?.fetchOverview()
+            ovReq?.onSuccess { rawOv ->
+                val prefs = context.getSharedPreferences("XingLingPrefs", android.content.Context.MODE_PRIVATE)
+                val limitEnabled = if (prefs.contains("local_data_limit_enabled")) prefs.getBoolean("local_data_limit_enabled", false) else rawOv.dataLimitEnabled
+                val limitMaxBytes = if (prefs.contains("local_data_limit_max_bytes")) prefs.getLong("local_data_limit_max_bytes", -1L) else rawOv.dataLimitMaxBytes
+                val offset = prefs.getLong("local_traffic_offset_bytes", 0L)
+
+                val adjustedOv = rawOv.copy(
+                    dataLimitEnabled = limitEnabled,
+                    dataLimitMaxBytes = limitMaxBytes,
+                    monthlyBytes = if (rawOv.monthlyBytes >= 0) rawOv.monthlyBytes + offset else -1L,
+                    dailyBytes = if (rawOv.dailyBytes >= 0) rawOv.dailyBytes + offset else -1L
+                )
+                overview = adjustedOv
+                if (adjustedOv.dailyBytes >= 0) {
+                    lastDailyBytes = adjustedOv.dailyBytes
+                    lastTickMs = now
+                }
+            }
+            ovReq?.onFailure { e -> lastError = e.message }
+            backend?.fetchSignalInfo()?.onSuccess { signal = it }
+            loadedOnce = true
+            isRefreshing.value = false
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().pullRefresh(pullRefreshState)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 120.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         // 页面标题 + 设备状态
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -213,7 +374,7 @@ fun OverviewScreen(
         if (ov != null) NetworkStatusCard(
             carrierName = sg?.carrierName ?: "中国移动",
             networkType = sg?.networkType ?: "5G SA",
-            bands = sg?.band ?: "N41+N28",
+            bands = sg?.band?.uppercase() ?: "N41+N28",
             rsrp = sg?.rsrp ?: Int.MIN_VALUE,
             signalLevel = ov.signalBars,
             dlMaxMbps = ov.dlMaxMbps,
@@ -244,20 +405,40 @@ fun OverviewScreen(
                 else -> iOSRed
             }
         } else iOSSecondaryLabel
-// 3. 5G载波聚合卡
+// 3. 5G载波聚合卡 (还原到原位置)
 CarrierAggregationCard(signalMetrics, connected = ov != null, qci = ov?.qci ?: "9", scoreText = scoreText, scoreColor = scoreColor)
 
-// 3. 设备监控图形卡
+// 4. 设备监控图形卡
 if (ov != null) DeviceMonitorCard(ov, cpuHistory.toList(), memHistory.toList())
 
-// 当前速率卡
-SpeedCard(speedBps = speedBps, ov, backend)
+// 当前速率卡（固件实时速率优先，失败回落差值估算）
+SpeedCard(
+    rxBps = if (firmwareSpeed) rxBps else fallbackBps,
+    txBps = txBps,
+    txKnown = txKnown,
+    firmwareSpeed = firmwareSpeed,
+    ov = ov,
+    backend = backend
+)
 
 
         // 4. 实时网速卡（上下行箭头 + 大数字）
 
-// 流量概览+趋势合并卡
-if (ov != null) TrafficCard(ov, dailyBytesHistory.toList())
+if (showTrafficDialog && ov != null) {
+    TrafficConfigDialog(
+        ov = ov,
+        backend = backend,
+        onDismiss = { showTrafficDialog = false },
+        onUpdated = {
+            scope.launch {
+                backend.fetchOverview().onSuccess { overview = it }
+            }
+        }
+    )
+}
+
+// 流量概览+趋势合并卡（点击可弹出设置已用流量/总流量上限/超额关网对话框）
+if (ov != null) TrafficCard(ov, dailyBytesHistory.toList(), onOpenTrafficConfig = { showTrafficDialog = true })
 
 // WiFi 热点信息卡（卡片内直接操作：开关 / SSID / 密码 / 连接数 / 广播隔离）
 HotspotOverviewCard(backend)
@@ -267,8 +448,18 @@ HotspotOverviewCard(backend)
 
         // 10. CPU / 内存占用趋势折线
 
-        // 11. 常用功能入口
-        QuickFeatureCard(onOpen = onOpenFeature)
+        // 5. 电源控制卡（页内直接操作：立即重启 / 立即关机，不跳二级页）
+        PowerControlOverviewCard(backend)
+
+        // 7. 定时任务卡（页内直接查看 / 新增 / 删除，不跳二级页）
+        ScheduledTasksOverviewCard(backend)
+    }
+        PullRefreshIndicator(
+            refreshing = isRefreshing.value,
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter),
+            contentColor = iOSBlue
+        )
     }
 }
 
@@ -377,10 +568,6 @@ private fun SignalScoreCard(sg: BackendSignalInfo) {
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
-    var useMbps by remember { mutableStateOf(false) }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -481,12 +668,70 @@ private fun ScoreDial(label: String, value: Int, unit: String, score: Int, color
 }
 
 // ================= 4. 实时网速卡 =================
+
+/** 速率独立采样周期：比主轮询快，保证读数跟得上真实速率 */
+private const val SPEED_POLL_MS = 1_500L
+
+/** 3 点滑动窗口中位数：压掉固件偶发的 0 值与单点尖峰 */
+private fun smoothSpeed(samples: MutableList<Long>, value: Long): Long {
+    samples.add(value)
+    while (samples.size > 3) samples.removeAt(0)
+    val sorted = samples.sorted()
+    return sorted[sorted.size / 2]
+}
+
+/** B/s → 展示串：MB/s 按 1024²；Mbps 按 10⁶（与运营商口径一致） */
+private fun formatSpeed(bps: Long, useMbps: Boolean): String =
+    if (useMbps) String.format("%.1f Mbps", bps.toDouble() * 8.0 / 1_000_000.0)
+    else String.format("%.2f MB/s", bps.toDouble() / 1_048_576.0)
+
+/**
+ * 单位切换分段控件：MB/s ⇄ Mbps。
+ * 整块（含两个分段）均可点击，热区足够大，避免纯文字标签点不中的问题；
+ * 选中项实心高亮，切换结果一眼可见。
+ */
 @Composable
-private fun SpeedCard(speedBps: Long, ov: BackendOverview?, backend: DeviceBackend?) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
-    var useMbps by remember { mutableStateOf(false) }
+private fun UnitSwitch(useMbps: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(iOSBlue.copy(alpha = 0.08f))
+            .border(1.dp, iOSBlue.copy(alpha = 0.30f), RoundedCornerShape(10.dp))
+            .clickable(onClick = onToggle)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        UnitChip("MB/s", active = !useMbps)
+        UnitChip("Mbps", active = useMbps)
+    }
+}
+
+@Composable
+private fun UnitChip(text: String, active: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (active) iOSBlue else Color.Transparent
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (active) Color.White else iOSBlue,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun SpeedCard(
+    rxBps: Long,
+    txBps: Long,
+    txKnown: Boolean,
+    firmwareSpeed: Boolean,
+    ov: BackendOverview?,
+    backend: DeviceBackend?
+) {
+    var useMbps by rememberSaveable { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -502,60 +747,23 @@ private fun SpeedCard(speedBps: Long, ov: BackendOverview?, backend: DeviceBacke
                 Spacer(modifier = Modifier.width(8.dp))
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = iOSBlue.copy(alpha = 0.12f)
+                    color = (if (firmwareSpeed) iOSBlue else iOSOrange).copy(alpha = 0.12f)
                 ) {
                     Text(
-                        "实时采样",
+                        if (firmwareSpeed) "固件实时" else "差值估算",
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         style = MaterialTheme.typography.labelSmall,
-                        color = iOSBlue
+                        color = if (firmwareSpeed) iOSBlue else iOSOrange
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    if (useMbps) "Mbps" else "MB/s",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = iOSBlue,
-                    modifier = Modifier.clickable { useMbps = !useMbps }
-                )
+                UnitSwitch(useMbps) { useMbps = !useMbps }
             }
             Spacer(modifier = Modifier.height(14.dp))
             Row(modifier = Modifier.fillMaxWidth()) {
-                SpeedStat("⬇ 下行", if (useMbps) String.format("%.1f Mbps", speedBps.toDouble() * 8.0 / 1_000_000.0) else String.format("%.2f MB/s", speedBps.toDouble() / 1_048_576.0), iOSBlue, Modifier.weight(1f))
-                SpeedStat("⬆ 上行", if (useMbps) String.format("%.1f Mbps", speedBps.toDouble() / 1_000_000.0) else String.format("%.2f MB/s", speedBps.toDouble() / 8.0 / 1_048_576.0), iOSGreen, Modifier.weight(1f))
+                SpeedStat("⬇ 下行", formatSpeed(rxBps, useMbps), iOSBlue, Modifier.weight(1f))
+                SpeedStat("⬆ 上行", if (txKnown) formatSpeed(txBps, useMbps) else "--", iOSGreen, Modifier.weight(1f))
                 SpeedStat("今日", formatBytesShort(ov?.dailyBytes ?: -1), iOSLabel, Modifier.weight(1f))
-            }
-            Spacer(modifier = Modifier.height(14.dp))
-            Button(
-                onClick = {
-                    if (!isTesting) {
-                        isTesting = true
-                        resultText = "测速中…"
-                        coroutineScope.launch {
-                            val feats = backend?.features
-                            if (feats == null) {
-                                resultText = "错误：未连接设备"
-                                isTesting = false
-                            } else {
-                                feats.speedtest(10).onSuccess { r ->
-                                    resultText = "下行：" + r.humanSpeed
-                                    isTesting = false
-                                }.onFailure {
-                                    resultText = "测速失败：" + it.message
-                                    isTesting = false
-                                }
-                            }
-                        }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = iOSBlue)
-            ) {
-                Text(if (isTesting) "测速中…" else "开始测速", color = Color.White)
-            }
-            if (resultText.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(resultText, style = MaterialTheme.typography.labelMedium, color = iOSSecondaryLabel)
             }
         }
     }
@@ -591,10 +799,6 @@ private fun DeviceMonitorCard(ov: BackendOverview, cpuHistory: List<Float>, memH
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
-
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1.1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("设备监控", style = MaterialTheme.typography.titleLarge, color = Color(0xFFC69250))
@@ -660,69 +864,67 @@ private fun DeviceMonitorCard(ov: BackendOverview, cpuHistory: List<Float>, memH
                 }
             }
 
-            if (cpuHistory.size >= 2) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Divider(color = iOSSeparator, thickness = 1.dp)
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("CPU / 内存占用率", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("CPU", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(iOSOrange))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("内存", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+            Spacer(modifier = Modifier.height(16.dp))
+            Divider(color = iOSSeparator, thickness = 1.dp)
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("CPU / 内存占用率", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("CPU", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+                Spacer(modifier = Modifier.width(10.dp))
+                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(iOSOrange))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("内存", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row {
+                // Y轴标签
+                Column(verticalArrangement = Arrangement.SpaceBetween) {
+                    Text("100", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                Row {
-                    // Y轴标签
-                    Column(verticalArrangement = Arrangement.SpaceBetween) {
-                        Text("100", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+                Spacer(modifier = Modifier.width(6.dp))
+                val cpuColor = iOSBlue
+                val memColor = iOSOrange
+                val axisColor = iOSSecondaryLabel
+                val gridColor = iOSSeparator
+                // 图表
+                Canvas(modifier = Modifier.weight(1f).height(100.dp)) {
+                    val w = size.width
+                    val h = size.height
+                    val sw = 2.5f
+                    // L形边框（左边+底边）
+                    drawLine(axisColor, Offset(0f, 0f), Offset(0f, h), strokeWidth = 1.dp.toPx())
+                    drawLine(axisColor, Offset(0f, h), Offset(w, h), strokeWidth = 1.dp.toPx())
+                    // 50%虚线
+                    // 20/40/60/80%参考线
+                    for (v in listOf(20f, 40f, 60f, 80f)) {
+                        drawLine(gridColor, Offset(0f, h - v/100*h), Offset(w, h - v/100*h), strokeWidth = 0.5.dp.toPx())
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
-                    val cpuColor = iOSBlue
-                    val memColor = iOSOrange
-                    val axisColor = iOSSecondaryLabel
-                    val gridColor = iOSSeparator
-                    // 图表
-                    Canvas(modifier = Modifier.weight(1f).height(100.dp)) {
-                        val w = size.width
-                        val h = size.height
-                        val sw = 2.5f
-                        // L形边框（左边+底边）
-                        drawLine(axisColor, Offset(0f, 0f), Offset(0f, h), strokeWidth = 1.dp.toPx())
-                        drawLine(axisColor, Offset(0f, h), Offset(w, h), strokeWidth = 1.dp.toPx())
-                        // 50%虚线
-                        // 20/40/60/80%参考线
-                        for (v in listOf(20f, 40f, 60f, 80f)) {
-                            drawLine(gridColor, Offset(0f, h - v/100*h), Offset(w, h - v/100*h), strokeWidth = 0.5.dp.toPx())
+                    drawLine(gridColor, Offset(0f, h/2), Offset(w, h/2), strokeWidth = 1.dp.toPx())
+                    // CPU线
+                    if (cpuHistory.size >= 2) {
+                        val p = androidx.compose.ui.graphics.Path()
+                        cpuHistory.forEachIndexed { i, v ->
+                            val x = w * i / (cpuHistory.size - 1)
+                            val y = h - (v.coerceIn(0f, 100f) / 100f) * h
+                            if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
                         }
-                        drawLine(gridColor, Offset(0f, h/2), Offset(w, h/2), strokeWidth = 1.dp.toPx())
-                        // CPU线
-                        if (cpuHistory.size >= 2) {
-                            val p = androidx.compose.ui.graphics.Path()
-                            cpuHistory.forEachIndexed { i, v ->
-                                val x = w * i / (cpuHistory.size - 1)
-                                val y = h - (v.coerceIn(0f, 100f) / 100f) * h
-                                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
-                            }
-                            drawPath(p, color = cpuColor, style = Stroke(sw, cap = StrokeCap.Round))
+                        drawPath(p, color = cpuColor, style = Stroke(sw, cap = StrokeCap.Round))
+                    }
+                    // 内存线
+                    if (memHistory.size >= 2) {
+                        val p = androidx.compose.ui.graphics.Path()
+                        memHistory.forEachIndexed { i, v ->
+                            val x = w * i / (memHistory.size - 1)
+                            val y = h - (v.coerceIn(0f, 100f) / 100f) * h
+                            if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
                         }
-                        // 内存线
-                        if (memHistory.size >= 2) {
-                            val p = androidx.compose.ui.graphics.Path()
-                            memHistory.forEachIndexed { i, v ->
-                                val x = w * i / (memHistory.size - 1)
-                                val y = h - (v.coerceIn(0f, 100f) / 100f) * h
-                                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
-                            }
-                            drawPath(p, color = memColor, style = Stroke(sw, cap = StrokeCap.Round))
-                        }
+                        drawPath(p, color = memColor, style = Stroke(sw, cap = StrokeCap.Round))
                     }
                 }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    Text("最近3分钟", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
-                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Text("最近3分钟", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
             }
         }
     }
@@ -790,9 +992,6 @@ private fun ServingCellCard(sg: BackendSignalInfo, dailyBytesHistory: List<Long>
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -824,7 +1023,7 @@ private fun ServingCellCard(sg: BackendSignalInfo, dailyBytesHistory: List<Long>
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         CellInfoItem("网络", sg.networkType)
-                        CellInfoItem("频段", sg.band.ifEmpty { "--" })
+                        CellInfoItem("频段", sg.band.uppercase().ifEmpty { "--" })
                         CellInfoItem("PCI", if (sg.pci > 0) "${sg.pci}" else "--")
                         CellInfoItem("频点", if (sg.arfcn > 0) "${sg.arfcn}" else "--")
                     }
@@ -835,12 +1034,13 @@ private fun ServingCellCard(sg: BackendSignalInfo, dailyBytesHistory: List<Long>
             Spacer(modifier = Modifier.height(10.dp))
             Text("当日流量趋势", style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
             Spacer(modifier = Modifier.height(6.dp))
-            if (dailyBytesHistory.size >= 2) {
-                val flowColor = iOSBlue
-                Canvas(modifier = Modifier.fillMaxWidth().height(80.dp)) {
-                    val w = size.width
-                    val h = size.height
-                    val maxBytes = dailyBytesHistory.maxOrNull() ?: 1L
+            val flowColor = iOSBlue
+            Canvas(modifier = Modifier.fillMaxWidth().height(80.dp)) {
+                val w = size.width
+                val h = size.height
+                val maxBytes = dailyBytesHistory.maxOrNull() ?: 1L
+                
+                if (dailyBytesHistory.size >= 2) {
                     val p = androidx.compose.ui.graphics.Path()
                     dailyBytesHistory.forEachIndexed { idx, v ->
                         val x = w * idx / (dailyBytesHistory.size - 1)
@@ -878,9 +1078,6 @@ private fun CpuMemTrendCard(cpuHistory: List<Float>, memHistory: List<Float>) {
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
             Text("CPU / 内存占用趋势", style = MaterialTheme.typography.titleMedium, color = iOSLabel)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
@@ -953,7 +1150,7 @@ private fun percentText(v: Float?): String =
     if (v == null || v < 0f) "--" else String.format(Locale.US, "%.1f%%", v)
 
 @Composable
-private fun TrafficCard(ov: BackendOverview, history: List<Long>) {
+private fun TrafficCard(ov: BackendOverview, history: List<Long>, onOpenTrafficConfig: () -> Unit = {}) {
     val monthlyTotal = if (ov.monthlyDlBytes > 0 || ov.monthlyUlBytes > 0) ov.monthlyDlBytes + ov.monthlyUlBytes else ov.monthlyBytes
     val dlPct = if (monthlyTotal > 0 && ov.monthlyDlBytes > 0) (ov.monthlyDlBytes * 100 / monthlyTotal).toInt() else 0
     val ulPct = if (monthlyTotal > 0 && ov.monthlyUlBytes > 0) (ov.monthlyUlBytes * 100 / monthlyTotal).toInt() else 0
@@ -966,14 +1163,18 @@ private fun TrafficCard(ov: BackendOverview, history: List<Long>) {
     } else "--"
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpenTrafficConfig() },
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = iOSCardBackground),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenTrafficConfig() },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -990,7 +1191,24 @@ private fun TrafficCard(ov: BackendOverview, history: List<Long>) {
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("流量详情", style = MaterialTheme.typography.titleMedium, color = iOSLabel, fontWeight = FontWeight.SemiBold)
                 }
-                Text("今日已用 ${formatBytesShort(ov.dailyBytes)}", style = MaterialTheme.typography.bodyMedium, color = iOSSecondaryLabel)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("今日已用 ${formatBytesShort(ov.dailyBytes)}", style = MaterialTheme.typography.bodyMedium, color = iOSSecondaryLabel)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = iOSBlue.copy(alpha = 0.12f)
+                    ) {
+                        Text(
+                            "设置/校准 ›",
+                            modifier = Modifier
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                                .clickable { onOpenTrafficConfig() },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = iOSBlue,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -1055,22 +1273,40 @@ private fun TrafficCard(ov: BackendOverview, history: List<Long>) {
                             .fillMaxWidth(progress)
                             .height(8.dp)
                             .clip(CircleShape)
-                            .background(iOSBlue)
+                            .background(if (ov.dataLimitEnabled && progress >= 1f) iOSRed else iOSBlue)
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "已用 ${(progress * 100).toInt()}% / 上限 ${formatGb(ov.dataLimitMaxBytes)} GB",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = iOSSecondaryLabel
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "已用 ${(progress * 100).toInt()}% / 上限 ${formatGb(ov.dataLimitMaxBytes)} GB",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = iOSSecondaryLabel
+                    )
+                    if (ov.dataLimitEnabled) {
+                        Text(
+                            "超额自动关网开启",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (progress >= 1f) iOSRed else iOSGreen
+                        )
+                    }
+                }
             } else {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(8.dp)
                         .clip(CircleShape)
-                        .background(iOSBlue.copy(alpha = 0.3f))
+                        .background(iOSFill)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "未设置流量上限（点击卡片即可设置月度套餐上限与校准用量）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = iOSSecondaryLabel
                 )
             }
 
@@ -1086,6 +1322,192 @@ private fun TrafficCard(ov: BackendOverview, history: List<Long>) {
             }
         }
     }
+}
+
+@Composable
+private fun TrafficConfigDialog(
+    ov: BackendOverview,
+    backend: DeviceBackend?,
+    onDismiss: () -> Unit,
+    onUpdated: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var usedGbText by remember { mutableStateOf(formatGbInput(ov.monthlyBytes)) }
+    var limitGbText by remember { mutableStateOf(if (ov.dataLimitMaxBytes > 0) formatGbInput(ov.dataLimitMaxBytes) else "") }
+    var disconnectOnExceed by remember { mutableStateOf(ov.dataLimitEnabled) }
+    var isSaving by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!isSaving) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF007AFF).copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = Color(0xFF007AFF), modifier = Modifier.size(18.dp))
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("流量管理与校准", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = iOSLabel)
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "校准已用流量并设置月度流量上限与超额关网规则。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = iOSSecondaryLabel
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 已用流量输入框
+                OutlinedTextField(
+                    value = usedGbText,
+                    onValueChange = { usedGbText = it },
+                    label = { Text("本月已用流量 (GB)") },
+                    placeholder = { Text("例如：5.2") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 总流量上限输入框
+                OutlinedTextField(
+                    value = limitGbText,
+                    onValueChange = { limitGbText = it },
+                    label = { Text("本月总流量上限 (GB)") },
+                    placeholder = { Text("例如：100 (留空为不限制)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 超额关闭流量开关
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = iOSFill,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("超额关闭流量", style = MaterialTheme.typography.bodyMedium, color = iOSLabel, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "当已用流量达到设定上限时，自动停止/切断流量",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = iOSSecondaryLabel
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Switch(
+                            checked = disconnectOnExceed,
+                            onCheckedChange = { disconnectOnExceed = it }
+                        )
+                    }
+                }
+
+                errorMsg?.let { err ->
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(err, color = Color(0xFFFF3B30), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !isSaving,
+                onClick = {
+                    isSaving = true
+                    errorMsg = null
+                    scope.launch {
+                        runCatching {
+                            val usedDouble = usedGbText.trim().toDoubleOrNull() ?: 0.0
+                            val usedBytes = (usedDouble * 1073741824.0).toLong()
+
+                            val limitDouble = limitGbText.trim().toDoubleOrNull()
+                            val limitBytes = if (limitDouble != null && limitDouble > 0) (limitDouble * 1073741824.0).toLong() else -1L
+
+                            // 1. 校准硬件已用流量（仅输入有效值时执行）
+                            // 1. 校准硬件已用流量（仅输入有效值时执行）
+                            if (usedGbText.isNotBlank()) {
+                                // 始终保存本地兜底
+                                val prefs = context.getSharedPreferences("XingLingPrefs", android.content.Context.MODE_PRIVATE)
+                                val currentHardwareBytes = ov.monthlyBytes
+                                val offset = usedBytes - currentHardwareBytes
+                                prefs.edit().putLong("local_traffic_offset_bytes", offset).apply()
+                                
+                                backend?.features?.calibrateFlow(usedBytes)
+                            }
+
+                            // 2. 设置流量上限及超额关网规则
+                            // 始终保存本地兜底
+                            val prefs = context.getSharedPreferences("XingLingPrefs", android.content.Context.MODE_PRIVATE)
+                            prefs.edit()
+                                .putBoolean("local_data_limit_enabled", disconnectOnExceed)
+                                .putLong("local_data_limit_max_bytes", limitBytes)
+                                .apply()
+                                
+                            backend?.features?.setDataLimit(
+                                DataLimit(
+                                    enabled = disconnectOnExceed,
+                                    maxLimit = if (limitBytes > 0) limitBytes.toString() else "-1",
+                                    period = "monthly",
+                                    checkReference = "system",
+                                    statusForwardEnabled = disconnectOnExceed
+                                )
+                            )
+                        }.onSuccess {
+                            onUpdated()
+                            onDismiss()
+                        }.onFailure { ex ->
+                            errorMsg = "保存失败: ${ex.message ?: "操作超时"}"
+                            isSaving = false
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = iOSBlue)
+            ) {
+                if (isSaving) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                Text("保存设置", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !isSaving,
+                onClick = onDismiss
+            ) {
+                Text("取消", color = iOSSecondaryLabel)
+            }
+        },
+        shape = RoundedCornerShape(20.dp),
+        containerColor = iOSCardBackground
+    )
+}
+
+private fun formatGbInput(bytes: Long): String {
+    if (bytes <= 0) return ""
+    val gb = bytes / 1073741824.0
+    return if (gb == gb.toLong().toDouble()) String.format(Locale.US, "%.0f", gb) else String.format(Locale.US, "%.2f", gb)
 }
 
 private fun formatGb(bytes: Long): String {
@@ -1104,9 +1526,6 @@ private fun DailyTrafficChartCard(history: List<Long>) {
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
-    var isTesting by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    var resultText by remember { mutableStateOf("") }
             Text("当日流量趋势", style = MaterialTheme.typography.titleMedium, color = iOSLabel)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
@@ -1215,6 +1634,12 @@ private enum class HotspotEdit { SSID, PASSWORD, MAX_STATION }
 private fun HotspotOverviewCard(backend: DeviceBackend?) {
     var info by remember { mutableStateOf<WifiApInfo?>(null) }
     var connected by remember { mutableStateOf<Int?>(null) }
+    var clients by remember { mutableStateOf<List<LanClient>>(emptyList()) }
+    var clientsLoaded by remember { mutableStateOf(false) }
+    var showClients by remember { mutableStateOf(false) }
+    var blackMacs by remember { mutableStateOf<List<String>>(emptyList()) }
+    var aclBusy by remember { mutableStateOf(false) }
+    var blockTarget by remember { mutableStateOf<LanClient?>(null) }
     var busy by remember { mutableStateOf(false) }
     var powerBusy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -1225,9 +1650,58 @@ private fun HotspotOverviewCard(backend: DeviceBackend?) {
 
     suspend fun refresh() {
         val feats = backend?.features ?: return
-        // 顺序请求：两个接口共用同一个 goform 会话，避免并发登录互相挤掉会话
+        // 顺序请求：多个接口共用同一个 goform 会话，避免并发登录互相挤掉会话
         feats.getWifiAp().onSuccess { info = it }
-        feats.getLanClients().onSuccess { connected = it.size }
+        feats.getLanClients()
+            .onSuccess {
+                clients = it
+                connected = it.size
+                clientsLoaded = true
+            }
+            .onFailure { clientsLoaded = true }
+        feats.getAccessControl().onSuccess { ac -> blackMacs = ac?.blackMacs ?: emptyList() }
+    }
+
+    // 拉黑设备：读取现有名单 → 追加目标 MAC → 以黑名单模式下发
+    fun blockClient(client: LanClient) {
+        if (aclBusy) return
+        val mac = client.mac.trim()
+        if (mac.isEmpty()) {
+            message = "该设备缺少 MAC 地址，无法拉黑"
+            messageError = true
+            return
+        }
+        scope.launch {
+            aclBusy = true
+            message = null
+            val feats = backend?.features
+            if (feats == null) {
+                message = "设备未连接"; messageError = true; aclBusy = false; return@launch
+            }
+            val cur = feats.getAccessControl().getOrNull() ?: AccessControl()
+            if (cur.blackMacs.any { it.equals(mac, ignoreCase = true) }) {
+                blackMacs = cur.blackMacs
+                message = "${hotspotClientLabel(client)} 已在黑名单中"; messageError = false
+                aclBusy = false
+                return@launch
+            }
+            val newBlack = cur.blackMacs + mac
+            val newNames = cur.blackNames + client.name.ifBlank { mac }
+            feats.setAccessControl(cur.copy(mode = "2", blackMacs = newBlack, blackNames = newNames))
+                .onSuccess {
+                    blackMacs = newBlack
+                    message = "已拉黑 ${hotspotClientLabel(client)}，正在断开该设备…"
+                    messageError = false
+                    delay(1500)
+                    refresh()
+                    message = "已拉黑 ${hotspotClientLabel(client)}"
+                }
+                .onFailure { e ->
+                    message = "拉黑失败：${e.message ?: "未知错误"}"
+                    messageError = true
+                }
+            aclBusy = false
+        }
     }
 
     LaunchedEffect(backend) { refresh() }
@@ -1281,7 +1755,7 @@ private fun HotspotOverviewCard(backend: DeviceBackend?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = iOSCardBackground),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
@@ -1336,7 +1810,25 @@ private fun HotspotOverviewCard(backend: DeviceBackend?) {
             Divider(color = iOSSeparator, thickness = 1.dp)
             HotspotStaticRow("加密方式", cur?.let { wifiAuthText(it.authMode, it.encrypType) } ?: "--")
             Divider(color = iOSSeparator, thickness = 1.dp)
-            HotspotStaticRow("已连接设备", cur?.let { "${connected ?: "--"} / ${it.maxStation} 台" } ?: "--")
+            // 已连接设备（点击就地展开/收起设备明细，无需进入二级页）
+            HotspotActionRow(
+                label = "已连接设备",
+                value = if (cur == null) "--" else "${connected ?: "--"} / ${cur.maxStation} 台",
+                enabled = cur != null
+            ) {
+                showClients = !showClients
+                if (showClients) scope.launch { refresh() } // 展开时拉取最新在线设备
+            }
+
+            if (showClients) {
+                Spacer(modifier = Modifier.height(4.dp))
+                HotspotClientList(
+                    clients = clients,
+                    loaded = clientsLoaded,
+                    blackMacs = blackMacs,
+                    busy = aclBusy
+                ) { target -> blockTarget = target }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -1371,6 +1863,29 @@ private fun HotspotOverviewCard(backend: DeviceBackend?) {
                 )
             }
         }
+    }
+
+    // 拉黑确认对话框（拉黑后该设备会被禁止接入，当前连接随之断开）
+    val blocking = blockTarget
+    if (blocking != null) {
+        AlertDialog(
+            onDismissRequest = { blockTarget = null },
+            title = { Text("拉黑该设备？") },
+            text = {
+                Text(
+                    "${hotspotClientLabel(blocking)}\n${blocking.mac.ifBlank { "未知 MAC" }}" +
+                        "\n\n拉黑后该设备将无法接入本热点，若当前正在连接会立即断开。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { blockTarget = null; blockClient(blocking) }) {
+                    Text("拉黑", color = iOSRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { blockTarget = null }) { Text("取消") }
+            }
+        )
     }
 
     // 编辑对话框（SSID / 密码 / 最大连接数）
@@ -1484,6 +1999,103 @@ private fun HotspotStaticRow(label: String, value: String) {
     }
 }
 
+private fun hotspotClientLabel(c: LanClient): String =
+    c.name.ifBlank { c.mac.ifBlank { "未知设备" } }
+
+/**
+ * 热点卡片内联的在线设备明细（就地展开，不进入二级页）。
+ * 每行显示名称 / MAC / IP / 在线状态，右侧可直接拉黑（写入 MAC 黑名单）。
+ */
+@Composable
+private fun HotspotClientList(
+    clients: List<LanClient>,
+    loaded: Boolean,
+    blackMacs: List<String>,
+    busy: Boolean,
+    onBlock: (LanClient) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(iOSFill)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        when {
+            !loaded -> Text(
+                "正在读取在线设备…",
+                style = MaterialTheme.typography.bodySmall,
+                color = iOSSecondaryLabel
+            )
+            clients.isEmpty() -> Text(
+                "暂无在线设备",
+                style = MaterialTheme.typography.bodySmall,
+                color = iOSSecondaryLabel
+            )
+            else -> {
+                clients.forEachIndexed { idx, c ->
+                    if (idx > 0) Divider(color = iOSSeparator, thickness = 1.dp)
+                    val blocked = blackMacs.any { it.equals(c.mac.trim(), ignoreCase = true) }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                hotspotClientLabel(c),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = iOSLabel,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                listOf(c.mac, c.ip, if (c.online) "在线" else "离线")
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = iOSSecondaryLabel,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        if (blocked) {
+                            Text(
+                                "已拉黑",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = iOSSecondaryLabel
+                            )
+                        } else {
+                            Text(
+                                "拉黑",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = iOSRed,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(iOSRed.copy(alpha = 0.12f))
+                                    .clickable(enabled = !busy, onClick = { onBlock(c) })
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    if (blackMacs.isNotEmpty())
+                        "黑名单已拉黑 ${blackMacs.size} 台设备；拉黑后设备无法接入热点，当前连接会断开。"
+                    else
+                        "拉黑后该设备将无法接入热点，当前连接会断开。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = iOSSecondaryLabel
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun HotspotMiniSwitch(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1574,104 +2186,684 @@ private fun wifiAuthText(authMode: String, encrypType: String): String {
     return if (enc.isBlank()) auth else "$auth · $enc"
 }
 
-// ================= 关机重启卡片 =================
+// ================= 电源控制卡片（页内直接操作：立即重启 / 立即关机） =================
+private enum class PowerAction(val label: String, val hint: String) {
+    REBOOT("立即重启", "重启后设备将短暂离线，约 1~3 分钟恢复联网"),
+    SHUTDOWN("立即关机", "关机后设备将断电，需要现场重新通电")
+}
+
 @Composable
-private fun PowerControlCard(backend: DeviceBackend?, onOpenFeature: (FeatureRoute) -> Unit) {
-    var busy by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        // 重启卡片
-        GlassCard(modifier = Modifier
-            .weight(1f)
-            .clickable(enabled = !busy) {
-                busy = true
-                scope.launch {
-                    backend?.features?.rebootDevice()
-                    busy = false
-                }
-            }
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFFFF9500)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("立即重启", style = MaterialTheme.typography.bodyMedium, color = iOSLabel)
+private fun OverviewActionRow(
+    label: String,
+    desc: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = if (label.contains("关机")) iOSRed else iOSLabel, fontWeight = FontWeight.SemiBold)
+            if (desc.isNotBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(desc, style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
             }
         }
-        // 关机卡片
-        GlassCard(modifier = Modifier
-            .weight(1f)
-            .clickable(enabled = !busy) {
-                busy = true
-                scope.launch {
-                    backend?.features?.shutdownDevice()
-                    busy = false
-                }
-            }
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(iOSRed),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("立即关机", style = MaterialTheme.typography.bodyMedium, color = iOSLabel)
-            }
-        }
+        Icon(Icons.Filled.KeyboardArrowRight, contentDescription = null, tint = iOSSecondaryLabel, modifier = Modifier.size(18.dp))
     }
 }
 
-// ================= 定时任务概览卡片 =================
 @Composable
-private fun TasksOverviewCard(backend: DeviceBackend?, onOpenFeature: (FeatureRoute) -> Unit) {
-    var taskCount by remember { mutableStateOf(0) }
-    
-    LaunchedEffect(Unit) {
-        backend?.features?.listTasks()?.onSuccess { taskCount = it.size }
+private fun OverviewQuickToggleRow(
+    label: String,
+    desc: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = iOSLabel, fontWeight = FontWeight.SemiBold)
+            if (desc.isNotBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(desc, style = MaterialTheme.typography.labelSmall, color = iOSSecondaryLabel)
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = iOSBlue
+            )
+        )
     }
-    
+}
+
+@Composable
+private fun PowerControlOverviewCard(backend: DeviceBackend?) {
+    val feats = backend?.features
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var messageError by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<PowerAction?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // 快捷开关状态
+    var highRailModeEnabled by remember { mutableStateOf(false) }
+    var promptHighRailReboot by remember { mutableStateOf(false) }
+    var dataEnabled by remember { mutableStateOf(true) }
+    var roamingEnabled by remember { mutableStateOf(false) }
+    var indicatorEnabled by remember { mutableStateOf(true) }
+    var perfModeEnabled by remember { mutableStateOf(false) }
+    var powerForwardEnabled by remember { mutableStateOf(false) }
+    var adguardRunning by remember { mutableStateOf(false) }
+
+    LaunchedEffect(backend) {
+        if (feats != null) {
+            feats.getPerformanceMode().onSuccess { perfModeEnabled = it }
+        }
+        (backend as? com.xingling.app.backend.UfiToolsBackend)?.let { ufi ->
+            runCatching { ufi.p0.getPowerForwardEnabled().onSuccess { powerForwardEnabled = it } }
+            runCatching { ufi.p2.getAdGuardStatus().onSuccess { adguardRunning = it.running } }
+        }
+    }
+
+    fun run(action: PowerAction) {
+        if (busy) return
+        scope.launch {
+            busy = true
+            message = null
+            if (feats == null) {
+                message = "设备未连接，无法下发指令"
+                messageError = true
+                busy = false
+                return@launch
+            }
+            val result = when (action) {
+                PowerAction.REBOOT -> feats.rebootDevice()
+                PowerAction.SHUTDOWN -> feats.shutdownDevice()
+            }
+            result
+                .onSuccess {
+                    message = when (action) {
+                        PowerAction.REBOOT -> "重启指令已下发，设备约 1~3 分钟恢复联网"
+                        PowerAction.SHUTDOWN -> "关机指令已下发，设备即将断电"
+                    }
+                    messageError = false
+                }
+                .onFailure { e ->
+                    message = "下发失败：${e.message ?: "未知错误"}"
+                    messageError = true
+                }
+            busy = false
+        }
+    }
+
     GlassCard(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFF9500).copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = null,
+                        tint = Color(0xFFFF9500),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "电源与快捷控制",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = iOSLabel,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "即时生效",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = iOSSecondaryLabel
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 1. 电源操作（快捷列表风格）
+            OverviewActionRow("立即重启", "重启设备，约 1~3 分钟恢复", !busy) { pending = PowerAction.REBOOT }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+            OverviewActionRow("立即关机", "关机后设备断电，需手动开机", !busy) { pending = PowerAction.SHUTDOWN }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = iOSSeparator, thickness = 1.dp)
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 2. 快捷开关列表
+            Text("快捷开关", style = MaterialTheme.typography.labelMedium, color = iOSSecondaryLabel, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                "⚠️ 提示：高铁模式、性能模式、聚合提速只能同时开启一项，开启其一将自动关闭另外两项。",
+                style = MaterialTheme.typography.labelSmall,
+                color = iOSSecondaryLabel,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            OverviewQuickToggleRow("高铁模式", "通过底层命令优化信令，在高速移动环境减少断流卡顿 (重启生效)", highRailModeEnabled, !busy) { on ->
+                highRailModeEnabled = on
+                if (on) {
+                    if (perfModeEnabled) {
+                        perfModeEnabled = false
+                        scope.launch { runCatching { feats?.setPerformanceMode(false) } }
+                    }
+                }
+                scope.launch {
+                    feats?.atCommand("AT+SP5GCMDS=\"set nr param\",35,${if (on) 1 else 0}", 0)
+                        ?.onSuccess { promptHighRailReboot = true }
+                        ?.onFailure { e -> highRailModeEnabled = !on; message = "操作失败：${e.message}"; messageError = true }
+                }
+            }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+            OverviewQuickToggleRow("蜂窝数据", "切换移动网络连接状态", dataEnabled, !busy) { on ->
+                dataEnabled = on
+                scope.launch {
+                    feats?.toggleCellularData()
+                        ?.onSuccess { message = "蜂窝数据已${if (on) "开启" else "关闭"}"; messageError = false }
+                        ?.onFailure { e -> dataEnabled = !on; message = "操作失败：${e.message}"; messageError = true }
+                }
+            }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+            OverviewQuickToggleRow("网络漫游", "异地/漫游数据连接开关", roamingEnabled, !busy) { on ->
+                roamingEnabled = on
+                scope.launch {
+                    feats?.toggleRoaming()
+                        ?.onSuccess { message = "网络漫游已切换"; messageError = false }
+                        ?.onFailure { e -> roamingEnabled = !on; message = "漫游设置失败：${e.message}"; messageError = true }
+                }
+            }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+            OverviewQuickToggleRow("指示灯", "设备 LED 状态灯开关", indicatorEnabled, !busy) { on ->
+                indicatorEnabled = on
+                scope.launch {
+                    feats?.toggleIndicatorLight()
+                        ?.onSuccess { message = "指示灯已切换"; messageError = false }
+                        ?.onFailure { e -> indicatorEnabled = !on; message = "操作失败：${e.message}"; messageError = true }
+                }
+            }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+            OverviewQuickToggleRow("性能模式", "极客高性能 / 满频调度", perfModeEnabled, !busy) { on ->
+                perfModeEnabled = on
+                if (on) {
+                    if (highRailModeEnabled) {
+                        highRailModeEnabled = false
+                        scope.launch { runCatching { feats?.atCommand("AT+SP5GCMDS=\"set nr param\",35,0", 0) } }
+                    }
+                }
+                scope.launch {
+                    feats?.setPerformanceMode(on)
+                        ?.onSuccess { message = "性能模式已${if (on) "开启" else "恢复标准"}"; messageError = false }
+                        ?.onFailure { e -> perfModeEnabled = !on; message = "操作失败：${e.message}"; messageError = true }
+                }
+            }
+            Divider(color = iOSSeparator.copy(alpha = 0.5f), thickness = 0.5.dp)
+
+            Text(
+                text = "原理：开启后将自动配置 iptables 强制劫持连接到此 WiFi 的所有设备的 53 端口流量至内置的 AdGuard 服务进行广告过滤。\n注意：AdGuard 运行会占用随身 WiFi 大量的 CPU 和内存，长时间开启可能导致设备严重发热、网速下降或死机！若不需要请勿开启。",
+                style = MaterialTheme.typography.labelSmall,
+                color = iOSRed,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            val msg = message
+            if (msg != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    msg,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (messageError) iOSRed else iOSGreen
+                )
+            }
+        }
+    }
+
+    
+    if (promptHighRailReboot) {
+        AlertDialog(
+            onDismissRequest = { promptHighRailReboot = false },
+            title = { Text("设置已下发", color = iOSLabel, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "高铁模式状态已改变。此功能需要重启随身 WiFi 才能在基带底层生效。是否立即重启？",
+                    color = iOSSecondaryLabel,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { promptHighRailReboot = false; pending = PowerAction.REBOOT }) {
+                    Text(
+                        "立即重启",
+                        color = Color(0xFFFF9500)
+                    )
+                }
+            },
+            dismissButton = { TextButton(onClick = { promptHighRailReboot = false }) { Text("稍后重启") } }
+        )
+    }
+
+    val target = pending
+
+    if (target != null) {
+        AlertDialog(
+            onDismissRequest = { pending = null },
+            title = { Text(target.label, color = iOSLabel, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "${target.hint}。确认立即执行？",
+                    color = iOSSecondaryLabel,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { pending = null; run(target) }) {
+                    Text(
+                        "确认执行",
+                        color = if (target == PowerAction.SHUTDOWN) iOSRed else Color(0xFFFF9500)
+                    )
+                }
+            },
+            dismissButton = { TextButton(onClick = { pending = null }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun PowerActionButton(
+    label: String,
+    icon: ImageVector,
+    iconColor: Color,
+    busy: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(iOSFill)
+            .clickable(enabled = !busy, onClick = onClick)
+            .padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF5856D6)),
+                    .background(iconColor.copy(alpha = if (busy) 0.45f else 1f)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Filled.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                }
             }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("定时任务", style = MaterialTheme.typography.titleMedium, color = iOSLabel)
-                Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (busy) iOSSecondaryLabel else iOSLabel
+            )
+        }
+    }
+}
+
+// ================= 定时任务卡片（页内直接查看 / 新增 / 删除） =================
+private val OverviewTaskActions = listOf(
+    "REBOOT_DEVICE" to "定时重启",
+    "SHUTDOWN_DEVICE" to "定时关机",
+    "PERFORMANCE_MODE_SETTING" to "切换性能模式"
+)
+
+private fun taskActionLabel(actionMap: Map<String, String>): String {
+    val raw = actionMap["goformId"] ?: return "未知动作"
+    return OverviewTaskActions.firstOrNull { it.first == raw }?.second ?: raw
+}
+
+@Composable
+private fun ScheduledTasksOverviewCard(backend: DeviceBackend?) {
+    var tasks by remember { mutableStateOf<List<ScheduledTask>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var messageError by remember { mutableStateOf(false) }
+    var showNew by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    suspend fun refresh() {
+        val feats = backend?.features
+        if (feats == null) {
+            tasks = emptyList()
+            return
+        }
+        feats.listTasks()
+            .onSuccess {
+                tasks = it
+                message = null
+                messageError = false
+            }
+            .onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                val emsg = e.message ?: ""
+                if (emsg.contains("Coroutine", ignoreCase = true) || emsg.contains("cancel", ignoreCase = true) || e is java.io.InterruptedIOException) {
+                    return@onFailure // 忽略因为协程取消导致的偶发异常
+                }
+                tasks = emptyList()
+                message = "任务读取失败：${emsg.ifBlank { "未知错误" }}"
+                messageError = true
+            }
+    }
+
+    LaunchedEffect(backend) { refresh() }
+
+    GlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF5856D6).copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Star,
+                        contentDescription = null,
+                        tint = Color(0xFF5856D6),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    "已设置 $taskCount 个任务",
-                    style = MaterialTheme.typography.bodySmall,
+                    "定时任务",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = iOSLabel,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "共 ${tasks?.size ?: 0} 个",
+                    style = MaterialTheme.typography.labelSmall,
                     color = iOSSecondaryLabel
                 )
             }
-            Text("›", color = iOSSecondaryLabel, fontSize = 20.sp)
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            val list = tasks
+            when {
+                list == null -> Text(
+                    "读取中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = iOSSecondaryLabel,
+                    modifier = Modifier.padding(vertical = 12.dp)
+                )
+                list.isEmpty() -> Box(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "暂无定时任务",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = iOSSecondaryLabel
+                    )
+                }
+                else -> list.forEachIndexed { idx, t ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 11.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                t.time,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = iOSLabel,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "${taskActionLabel(t.actionMap)} · ${if (t.repeatDaily) "每天重复" else "单次执行"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = iOSSecondaryLabel
+                            )
+                        }
+                        Text(
+                            "删除",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = iOSRed,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = !busy) {
+                                    busy = true
+                                    message = null
+                                    scope.launch {
+                                        val feats = backend?.features
+                                        if (feats == null) {
+                                            message = "设备未连接，无法删除任务"
+                                            messageError = true
+                                        } else {
+                                            feats.removeTask(t.id)
+                                                .onSuccess {
+                                                    message = "已删除任务 ${t.id}"
+                                                    messageError = false
+                                                    refresh()
+                                                }
+                                                .onFailure { e ->
+                                                    message = "删除失败：${e.message ?: "未知错误"}"
+                                                    messageError = true
+                                                }
+                                        }
+                                        busy = false
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                    if (idx < list.size - 1) {
+                        Divider(color = iOSSeparator, thickness = 1.dp)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            iOSButton(
+                onClick = { showNew = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("＋ 新建任务", fontSize = 15.sp, color = Color.White)
+            }
+
+            val msg = message
+            if (msg != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    msg,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (messageError) iOSRed else iOSGreen
+                )
+            }
         }
+    }
+
+    if (showNew) {
+        var hour by remember { mutableStateOf("02") }
+        var minute by remember { mutableStateOf("00") }
+        var action by remember { mutableStateOf("REBOOT_DEVICE") }
+        var repeatDaily by remember { mutableStateOf(true) }
+        var perfOn by remember { mutableStateOf(true) }
+        var error by remember { mutableStateOf<String?>(null) }
+
+        AlertDialog(
+            onDismissRequest = { if (!busy) showNew = false },
+            title = { Text("新建定时任务", color = iOSLabel, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = hour,
+                            onValueChange = { v -> hour = v.filter { it.isDigit() }.take(2); error = null },
+                            singleLine = true,
+                            label = { Text("时") },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        OutlinedTextField(
+                            value = minute,
+                            onValueChange = { v -> minute = v.filter { it.isDigit() }.take(2); error = null },
+                            singleLine = true,
+                            label = { Text("分") },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    OverviewTaskActions.forEach { (value, label) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = !busy) { action = value },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = action == value,
+                                onClick = { action = value },
+                                enabled = !busy
+                            )
+                            Text(label, style = MaterialTheme.typography.bodyMedium, color = iOSLabel)
+                        }
+                    }
+
+                    if (action == "PERFORMANCE_MODE_SETTING") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "执行后开启性能模式",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = iOSLabel
+                            )
+                            Switch(
+                                checked = perfOn,
+                                enabled = !busy,
+                                onCheckedChange = { perfOn = it }
+                            )
+                        }
+                    }
+
+                    Divider(color = iOSSeparator, thickness = 1.dp)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("每天重复", style = MaterialTheme.typography.bodyMedium, color = iOSLabel)
+                        Switch(
+                            checked = repeatDaily,
+                            enabled = !busy,
+                            onCheckedChange = { repeatDaily = it }
+                        )
+                    }
+
+                    val err = error
+                    if (err != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(err, style = MaterialTheme.typography.labelSmall, color = iOSRed)
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        "时间范围 00~23 时 / 00~59 分；任务标识与「定时任务」页保持一致",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = iOSSecondaryLabel
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val h = hour.trim().padStart(2, '0').takeLast(2)
+                    val m = minute.trim().padStart(2, '0').takeLast(2)
+                    val hi = h.toIntOrNull()
+                    val mi = m.toIntOrNull()
+                    if (hi == null || hi !in 0..23 || mi == null || mi !in 0..59) {
+                        error = "请输入 00~23 时 / 00~59 分"
+                    } else {
+                        val actionMap = if (action == "PERFORMANCE_MODE_SETTING") {
+                            mapOf("goformId" to action, "performance_mode" to if (perfOn) "1" else "0")
+                        } else {
+                            mapOf("goformId" to action)
+                        }
+                        busy = true
+                        message = null
+                        scope.launch {
+                            val feats = backend?.features
+                            if (feats == null) {
+                                message = "设备未连接，无法新建任务"
+                                messageError = true
+                            } else {
+                                feats.addTask("$action-$h$m", "$h:$m", repeatDaily, actionMap)
+                                    .onSuccess {
+                                        message = "任务已添加（${if (repeatDaily) "每天" else "单次"} $h:$m）"
+                                        messageError = false
+                                        showNew = false
+                                        refresh()
+                                    }
+                                    .onFailure { e ->
+                                        message = "新建失败：${e.message ?: "未知错误"}"
+                                        messageError = true
+                                    }
+                            }
+                            busy = false
+                        }
+                    }
+                }) { Text("提交") }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!busy) showNew = false }) { Text("取消") }
+            }
+        )
     }
 }
 // ================= 网络状态卡片 =================
@@ -1701,6 +2893,8 @@ private fun NetworkStatusCard(
         effectiveSignalLevel >= 2 -> iOSOrange
         else -> iOSRed
     }
+    // 速率单位：false=Mbps（兆比特/秒），true=MB/s（兆字节/秒，1 MB/s = 8 Mbps）；上下行同步切换
+    var asMBps by remember { mutableStateOf(false) }
     GlassCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // 第一行：网络状态
@@ -1779,9 +2973,11 @@ private fun NetworkStatusCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 签约下行
+                // 签约下行（点击数字可在 Mbps / MB·s⁻¹ 间切换）
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { asMBps = !asMBps },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Row(
@@ -1789,16 +2985,16 @@ private fun NetworkStatusCard(
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            if (dlMaxMbps > 0) "$dlMaxMbps" else "--",
+                            fmtRate(dlMaxMbps, asMBps),
                             style = MaterialTheme.typography.headlineMedium,
                             color = iOSLabel,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            "Mbps",
+                            if (asMBps) "MB/s" else "Mbps",
                             style = MaterialTheme.typography.bodySmall,
-                            color = iOSSecondaryLabel
+                            color = iOSBlue
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1815,9 +3011,11 @@ private fun NetworkStatusCard(
                         .height(40.dp)
                         .background(iOSSeparator)
                 )
-                // 签约上行
+                // 签约上行（点击数字可在 Mbps / MB·s⁻¹ 间切换）
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { asMBps = !asMBps },
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Row(
@@ -1825,16 +3023,16 @@ private fun NetworkStatusCard(
                         horizontalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            if (ulMaxMbps > 0) "$ulMaxMbps" else "--",
+                            fmtRate(ulMaxMbps, asMBps),
                             style = MaterialTheme.typography.headlineMedium,
                             color = iOSLabel,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            "Mbps",
+                            if (asMBps) "MB/s" else "Mbps",
                             style = MaterialTheme.typography.bodySmall,
-                            color = iOSSecondaryLabel
+                            color = iOSBlue
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1873,6 +3071,15 @@ private fun NetworkStatusCard(
         }
     }
 }
+
+/** 速率格式化：Mbps 显示整数；切到 MB/s 时按 1 MB/s = 8 Mbps 换算（整除取整，否则保留一位小数） */
+private fun fmtRate(mbps: Int, asMBps: Boolean): String {
+    if (mbps <= 0) return "--"
+    if (!asMBps) return mbps.toString()
+    val v = mbps / 8.0
+    return if (v % 1.0 == 0.0) v.toInt().toString() else String.format(java.util.Locale.US, "%.1f", v)
+}
+
 // ================= 签约速率卡片 =================
 @Composable
 private fun ContractRateCard(ov: BackendOverview) {

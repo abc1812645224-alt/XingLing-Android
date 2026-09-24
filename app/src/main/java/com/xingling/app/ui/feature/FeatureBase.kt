@@ -354,11 +354,14 @@ fun FeatureTextField(
     placeholder: String = "",
     singleLine: Boolean = true,
     keyboard: androidx.compose.ui.text.input.KeyboardType = androidx.compose.ui.text.input.KeyboardType.Text,
+    maxLength: Int = 5000,
     modifier: Modifier = Modifier.fillMaxWidth()
 ) {
+    // 防御超长文本：超过上限截断，避免 singleLine TextField 水平滚动宽度溢出崩溃
+    val safeValue = if (value.length > maxLength) value.take(maxLength) else value
     OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
+        value = safeValue,
+        onValueChange = { newVal -> onValueChange(if (newVal.length > maxLength) newVal.take(maxLength) else newVal) },
         label = { Text(label, color = iOSSecondaryLabel) },
         placeholder = {
             if (placeholder.isNotEmpty()) Text(placeholder, color = iOSSecondaryLabel.copy(alpha = 0.6f))

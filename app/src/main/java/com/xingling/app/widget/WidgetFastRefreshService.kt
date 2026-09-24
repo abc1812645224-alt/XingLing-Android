@@ -1,18 +1,10 @@
 /*
- * 星灵 (XingLing) · 亮屏高频刷新窗口（短时前台服务）
+ * 鏄熺伒 (XingLing) 路 浜睆楂橀鍒锋柊绐楀彛锛堢煭鏃跺墠鍙版湇鍔★級
  *
- * 职责：屏幕点亮/解锁后开启一个「最多 3 分钟」的 15 秒轮询窗口。
- *   - Android 14+（API 34）走 FOREGROUND_SERVICE_TYPE_SHORT_SERVICE + 对应权限，
- *     由系统保证 3 分钟上限（超时回调 onTimeout 停止）；
- *   - 低版本（API 28~33）走普通前台服务 + IMPORTANCE_MIN 静默通知渠道，
- *     由本服务内部的 3 分钟 deadline 自行停止。
- *   - 通知仅在窗口期内存在，停止时立即撤销。
- *   - 熄屏（ACTION_SCREEN_OFF）或星灵 App 回到前台时立即停止。
- *   - 每 15 秒取一次数，先与快照比对：无变化跳过重绘，有变化才重绘。
- *
- * 生命周期边界：进程被杀 → 窗口随之结束（不常驻、不闹钟续跑），
- * 这是「不给随身 WiFi 后台造成全天候压力」的关键约束。
- *
+ * 鑱岃矗锛氬睆骞曠偣浜?瑙ｉ攣鍚庡紑鍚竴涓€屾渶澶?3 鍒嗛挓銆嶇殑 15 绉掕疆璇㈢獥鍙ｃ€? *   - Android 14+锛圓PI 34锛夎蛋 FOREGROUND_SERVICE_TYPE_SHORT_SERVICE + 瀵瑰簲鏉冮檺锛? *     鐢辩郴缁熶繚璇?3 鍒嗛挓涓婇檺锛堣秴鏃跺洖璋?onTimeout 鍋滄锛夛紱
+ *   - 浣庣増鏈紙API 28~33锛夎蛋鏅€氬墠鍙版湇鍔?+ IMPORTANCE_MIN 闈欓粯閫氱煡娓犻亾锛? *     鐢辨湰鏈嶅姟鍐呴儴鐨?3 鍒嗛挓 deadline 鑷鍋滄銆? *   - 閫氱煡浠呭湪绐楀彛鏈熷唴瀛樺湪锛屽仠姝㈡椂绔嬪嵆鎾ら攢銆? *   - 鐔勫睆锛圓CTION_SCREEN_OFF锛夋垨鏄熺伒 App 鍥炲埌鍓嶅彴鏃剁珛鍗冲仠姝€? *   - 姣?15 绉掑彇涓€娆℃暟锛屽厛涓庡揩鐓ф瘮瀵癸細鏃犲彉鍖栬烦杩囬噸缁橈紝鏈夊彉鍖栨墠閲嶇粯銆? *
+ * 鐢熷懡鍛ㄦ湡杈圭晫锛氳繘绋嬭鏉€ 鈫?绐楀彛闅忎箣缁撴潫锛堜笉甯搁┗銆佷笉闂归挓缁窇锛夛紝
+ * 杩欐槸銆屼笉缁欓殢韬?WiFi 鍚庡彴閫犳垚鍏ㄥぉ鍊欏帇鍔涖€嶇殑鍏抽敭绾︽潫銆? *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
@@ -58,14 +50,22 @@ class WidgetFastRefreshService : Service() {
             stopWindow()
             return START_NOT_STICKY
         }
-        promoteToForeground()
+        try {
+            promoteToForeground()
+        } catch (t: Throwable) {
+            // 系统不允许此时提升前台（后台 FGS 限制 / Android 14 短服务配额）：
+            // 立即安全退出，交给 goAsync 立即刷新与 WorkManager 兜底，绝不让系统抛出
+            // ForegroundServiceDidNotStartInTimeException。
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (pollJob?.isActive != true) {
             pollJob = scope.launch { runWindow() }
         }
         return START_NOT_STICKY
     }
 
-    /** Android 14+ 短时前台服务到点回调（系统级 3 分钟硬上限） */
+    /** Android 14+ 鐭椂鍓嶅彴鏈嶅姟鍒扮偣鍥炶皟锛堢郴缁熺骇 3 鍒嗛挓纭笂闄愶級 */
     override fun onTimeout(startId: Int) {
         stopWindow()
     }
@@ -76,7 +76,7 @@ class WidgetFastRefreshService : Service() {
         super.onDestroy()
     }
 
-    // ───────────────────────── 窗口主体 ─────────────────────────
+    // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 绐楀彛涓讳綋 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     private suspend fun runWindow() {
         val deadline = SystemClock.elapsedRealtime() + WidgetRefreshPolicy.WINDOW_MAX_MS
@@ -109,14 +109,13 @@ class WidgetFastRefreshService : Service() {
         pm?.isInteractive ?: false
     }.getOrDefault(false)
 
-    // ───────────────────────── 前台化 / 通知 ─────────────────────────
+    // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ 鍓嶅彴鍖?/ 閫氱煡 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     private fun promoteToForeground() {
         ensureChannel()
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Android 14+：短时前台服务（系统保证 3 分钟上限）
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
+            // Android 14+锛氱煭鏃跺墠鍙版湇鍔★紙绯荤粺淇濊瘉 3 鍒嗛挓涓婇檺锛?            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -175,9 +174,7 @@ class WidgetFastRefreshService : Service() {
             private set
 
         /**
-         * 开启刷新窗口。若系统禁止后台启动前台服务（Android 12+ 的后台限制），
-         * 降级为一次性 WorkManager 立即刷新，保证「亮屏当场刷一次」不落空。
-         */
+         * 寮€鍚埛鏂扮獥鍙ｃ€傝嫢绯荤粺绂佹鍚庡彴鍚姩鍓嶅彴鏈嶅姟锛圓ndroid 12+ 鐨勫悗鍙伴檺鍒讹級锛?         * 闄嶇骇涓轰竴娆℃€?WorkManager 绔嬪嵆鍒锋柊锛屼繚璇併€屼寒灞忓綋鍦哄埛涓€娆°€嶄笉钀界┖銆?         */
         fun start(context: Context) {
             val app = context.applicationContext
             val intent = Intent(app, WidgetFastRefreshService::class.java)
@@ -185,7 +182,7 @@ class WidgetFastRefreshService : Service() {
                 .onFailure { WidgetRefreshScheduler.enqueueImmediate(app) }
         }
 
-        /** 停止刷新窗口（幂等；App 回前台、熄屏时调用） */
+        /** 鍋滄鍒锋柊绐楀彛锛堝箓绛夛紱App 鍥炲墠鍙般€佺唲灞忔椂璋冪敤锛?*/
         fun stop(context: Context) {
             runCatching {
                 context.applicationContext.stopService(
@@ -195,3 +192,4 @@ class WidgetFastRefreshService : Service() {
         }
     }
 }
+

@@ -9,6 +9,8 @@
 
 package com.xingling.app.ui.overview
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,20 +23,24 @@ import com.xingling.app.ui.feature.FeatureRouteHost
 @Composable
 fun OverviewHome(backend: DeviceBackend?, onAddDevice: () -> Unit, pollIntervalMs: Long = 5_000L) {
     var route by remember { mutableStateOf<FeatureRoute?>(null) }
-    val current = route
-    if (current != null) {
-        FeatureRouteHost(
-            route = current,
+    // 总览页常驻底层，二级页覆盖在上层，返回后总览滚动位置与状态保留
+    Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+        OverviewScreen(
             backend = backend,
-            onBack = { route = null },
-            onAddDevice = onAddDevice
+            onAddDevice = onAddDevice,
+            onOpenFeature = { route = it },
+            pollIntervalMs = pollIntervalMs
         )
-        return
+        val current = route
+        if (current != null) {
+            Box(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+                FeatureRouteHost(
+                    route = current,
+                    backend = backend,
+                    onBack = { route = null },
+                    onAddDevice = onAddDevice
+                )
+            }
+        }
     }
-    OverviewScreen(
-        backend = backend,
-        onAddDevice = onAddDevice,
-        onOpenFeature = { route = it },
-        pollIntervalMs = pollIntervalMs
-    )
 }

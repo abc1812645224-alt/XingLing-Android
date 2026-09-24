@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 星灵 (XingLing)
  * Copyright (C) 2026 XingLing Project
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -19,6 +19,7 @@ package com.xingling.app
 import android.app.Application
 import com.xingling.app.backend.DeviceNetwork
 import com.xingling.app.widget.WidgetRefreshScheduler
+import com.xingling.app.widget.WidgetAlarmScheduler
 import com.xingling.app.widget.WidgetScreenStateWatcher
 import dagger.hilt.android.HiltAndroidApp
 
@@ -32,6 +33,8 @@ class XingLingApplication : Application() {
         // 桌面小组件分层自适应刷新：
         // 纯后台 15 分钟周期（重复注册不会产生多个任务）
         WidgetRefreshScheduler.schedule(this)
+        // AlarmManager 兜底闹钟：进程被杀后仍可被系统唤起刷新小组件
+        WidgetAlarmScheduler.schedule(this)
         // 进程存活期间监听屏幕点亮/解锁 → 立即刷新并开启 15 秒高频窗口
         WidgetScreenStateWatcher.register(this)
     }

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 星灵 (XingLing) · P2 设备端二进制服务管理
  *
  * 通过 UFI-TOOLS /api/root_shell 直连设备后台，管理三类自行下载到
@@ -187,16 +187,44 @@ class P2FeatureHelper(
 
     suspend fun startAdGuard(): Result<Unit> = runCatching {
         requireBinary("/data/local/tmp/AdGuardHome")
-        rootShell("cd /data/local/tmp && nohup ./AdGuardHome -h 0.0.0.0 -p 3000 > /data/local/tmp/adguard.log 2>&1 &")
-            .getOrThrow()
+        val cmd = """
+            cd /data/local/tmp;
+            if [ ! -f AdGuardHome.yaml ]; then
+              echo 'bind_host: 0.0.0.0' > AdGuardHome.yaml;
+              echo 'bind_port: 3000' >> AdGuardHome.yaml;
+              echo 'dns:' >> AdGuardHome.yaml;
+              echo '  bind_hosts:' >> AdGuardHome.yaml;
+              echo '  - 0.0.0.0' >> AdGuardHome.yaml;
+              echo '  port: 5353' >> AdGuardHome.yaml;
+              echo '  upstream_dns:' >> AdGuardHome.yaml;
+              echo '  - 223.5.5.5' >> AdGuardHome.yaml;
+              echo '  - 114.114.114.114' >> AdGuardHome.yaml;
+              echo '  bootstrap_dns:' >> AdGuardHome.yaml;
+              echo '  - 223.5.5.5' >> AdGuardHome.yaml;
+            fi;
+            iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null;
+            iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null;
+            nohup ./AdGuardHome -c ./AdGuardHome.yaml -h 0.0.0.0 -p 3000 > /data/local/tmp/adguard.log 2>&1 &
+            sleep 1;
+            iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353;
+            iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5353;
+        """.trimIndent().replace("\n", " ")
+        rootShell(cmd).getOrThrow()
         delay(1500)
         val st = detectBinary("AdGuardHome", 3000)
         if (!st.running) throw IllegalStateException("AdGuardHome 启动后未检测到进程，请查看日志")
     }
 
     suspend fun stopAdGuard(): Result<Unit> = runCatching {
-        rootShell("pkill -f AdGuardHome 2>/dev/null; sleep 1; pkill -9 -f AdGuardHome 2>/dev/null; true")
-            .getOrThrow()
+        val cmd = """
+            pkill -f AdGuardHome 2>/dev/null;
+            iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null;
+            iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null;
+            sleep 1;
+            pkill -9 -f AdGuardHome 2>/dev/null;
+            true
+        """.trimIndent().replace("\n", " ")
+        rootShell(cmd).getOrThrow()
         Unit
     }
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 星灵 (XingLing) · 桌面小组件入口
  *
  * 两个尺寸共享同一取数链路与视觉规范：
@@ -63,6 +63,7 @@ class XingLingWidgetReceiver : GlanceAppWidgetReceiver() {
     override fun onEnabled(context: Context) {
         super.onEnabled(context)
         WidgetRefreshScheduler.schedule(context)
+        WidgetAlarmScheduler.schedule(context)
         // 进程被系统唤起时补挂屏幕状态监听（进程存活期间亮屏即触发刷新）
         WidgetScreenStateWatcher.register(context)
     }
@@ -79,6 +80,7 @@ class XingLingWidgetSmallReceiver : GlanceAppWidgetReceiver() {
     override fun onEnabled(context: Context) {
         super.onEnabled(context)
         WidgetRefreshScheduler.schedule(context)
+        WidgetAlarmScheduler.schedule(context)
         WidgetScreenStateWatcher.register(context)
     }
 
